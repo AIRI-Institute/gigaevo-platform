@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.mypy_cache
+
+# Virtual environments
+.venv
+input_data/*
+uv.lock
+.env
+
+.aider*
+.DS_store
+.ruff_cache
+*.ipynb
+*.tsv
+*.cbm
+catboost_info
+CLAUDE.md
+.claude
+
+# Cloned repositories
+**/repos/
+*/repos/metaevolve/
+
+master_api/temp_experiments/*
+!master_api/temp_experiments/.gitkeep
+master_api/geml_master.db
+web_ui/input_data
+
+

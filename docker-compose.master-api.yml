@@ -1,0 +1,41 @@
+services:
+  # Master API
+  master-api:
+    build:
+      context: ./master_api
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE__URL=postgresql+asyncpg://gemluser:gemlpass@postgres:5432/geml_master
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=minioadmin
+      - STORAGE__SECRET_KEY=minioadmin
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA__ENABLED=true
+      - KAFKA__BOOTSTRAP_SERVERS=kafka:9092
+      - RUNNER__BASE_URL=http://runner-api:8001
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-gigavolve:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - input_data:/app/input_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - geml-network
+
+networks:
+  geml-network:
+    external: true

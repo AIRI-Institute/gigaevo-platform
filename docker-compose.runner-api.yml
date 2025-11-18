@@ -1,0 +1,45 @@
+services:
+  # Runner API
+  runner-api:
+    build:
+      context: ./runner_api
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - REDIS__URL=redis://redis:6379/0
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=minioadmin
+      - STORAGE__SECRET_KEY=minioadmin
+      - GIGAVOLVE__REDIS_URL=redis://redis-gigavolve:6379/0
+      - KAFKA__BOOTSTRAP_SERVERS=kafka:9092
+      - WORKER__AUTOSTART=true
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-gigavolve:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - gigavolve_cache:/tmp/gigavolve
+      - input_data:/app/input_data
+      - problems_data:/tmp/problems
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - geml-network
+
+volumes:
+  gigavolve_cache:
+  input_data:
+  problems_data:
+
+networks:
+  geml-network:
+    external: true

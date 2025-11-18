@@ -1,0 +1,29 @@
+services:
+  # Web UI
+  web-ui:
+    build:
+      context: ./web_ui
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - MASTER_API_URL=http://master-api:8000
+      - PUBLIC_MASTER_API_URL=http://localhost:8000
+    ports:
+      - "7860:7860"
+    depends_on:
+      master-api:
+        condition: service_healthy
+    volumes:
+      - input_data:/app/input_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - geml-network
+
+networks:
+  geml-network:
+    external: true

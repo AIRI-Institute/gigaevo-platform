@@ -1,0 +1,138 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: geml_master
+      POSTGRES_USER: gemluser
+      POSTGRES_PASSWORD: gemlpass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gemluser -d geml_master"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for task queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Master API
+  master-api:
+    build:
+      context: ./master_api
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE__URL=postgresql+asyncpg://gemluser:gemlpass@postgres:5432/geml_master
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=minioadmin
+      - STORAGE__SECRET_KEY=minioadmin
+      - REDIS_URL=redis://redis:6379/0
+      - RUNNER__BASE_URL=http://runner-api:8001
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - input_data:/app/input_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Runner API
+  runner-api:
+    build:
+      context: ./runner_api
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - REDIS__URL=redis://redis:6379/0
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=minioadmin
+      - STORAGE__SECRET_KEY=minioadmin
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - gigavolve_cache:/tmp/gigavolve
+      - input_data:/app/input_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Web UI
+  web-ui:
+    build:
+      context: ./web_ui
+      dockerfile: Dockerfile
+    environment:
+      - MASTER_API_URL=http://master-api:8000
+    ports:
+      - "7860:7860"
+    depends_on:
+      master-api:
+        condition: service_healthy
+    volumes:
+      - input_data:/app/input_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+  redis_gigavolve:
+  minio_data:
+  input_data:
+  gigavolve_cache:
+
+networks:
+  default:
+    name: geml-network

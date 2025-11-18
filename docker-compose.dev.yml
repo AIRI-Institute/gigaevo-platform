@@ -1,0 +1,231 @@
+services:
+  # Development configuration with hot reload and debugging
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: geml_master
+      POSTGRES_USER: gemluser
+      POSTGRES_PASSWORD: gemlpass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  # Redis for task queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Redis for GigaEvolve experiments
+  redis-gigavolve:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_gigavolve:/data
+
+  # Zookeeper (required for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      # Suppress noisy NIOServerCnxn client disconnect messages
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: "ERROR"
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "zookeeper"
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_HOST://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TOOLS_LOGEVENTS_ENABLE: "true"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Additional required environment variables for newer Kafka images
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://localhost:9092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://kafka:29092
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+      - "29093:29093"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "kafka-broker-api-versions",
+          "--bootstrap-server",
+          "localhost:9092",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI (Kafdrop)
+  kafka-ui:
+    image: obsidiandynamics/kafdrop:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERCONNECT: kafka:29092
+      KAFKA_PROPERTIES: security.protocol=PLAINTEXT
+      SERVER_SERVLET_CONTEXTPATH: /
+    ports:
+      - "8080:9000"
+    restart: unless-stopped
+
+  # MinIO S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # Master API (Development)
+  master-api:
+    build:
+      context: ./master_api
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      - DATABASE__URL=postgresql+asyncpg://gemluser:gemlpass@postgres:5432/geml_master
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=minioadmin
+      - STORAGE__SECRET_KEY=minioadmin
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA__ENABLED=true
+      - KAFKA__BOOTSTRAP_SERVERS=kafka:29092
+      - RUNNER__BASE_URL=http://runner-api:8001
+      - DEBUG=true
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./master_api/src:/app/src
+      - input_data:/app/input_data
+    command:
+      [
+        "uv",
+        "run",
+        "uvicorn",
+        "src.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
+
+  # Runner API (Development)
+  runner-api:
+    build:
+      context: ./runner_api
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      - REDIS__URL=redis://redis:6379/0
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=minioadmin
+      - STORAGE__SECRET_KEY=minioadmin
+      - GIGAVOLVE__REDIS_URL=redis://redis-gigavolve:6379/0
+      - DEBUG=true
+      - WORKER__AUTOSTART=true
+    ports:
+      - "8001:8001"
+    depends_on:
+      - redis
+      - redis-gigavolve
+      - minio
+    volumes:
+      - ./runner_api/src:/app/src
+      - ./runner_api/repos:/app/repos
+      - input_data:/app/input_data
+    command:
+      [
+        "uv",
+        "run",
+        "uvicorn",
+        "src.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+        "--reload",
+        "--reload-dir",
+        "/app/src",
+      ]
+
+  # Web UI (Development)
+  web-ui:
+    build:
+      context: ./web_ui
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      - MASTER_API_URL=http://master-api:8000
+      - PUBLIC_MASTER_API_URL=http://localhost:8000
+    ports:
+      - "7860:7860"
+    depends_on:
+      - master-api
+    volumes:
+      - ./web_ui:/app
+    command: ["uv", "run", "python", "app.py"]
+
+volumes:
+  postgres_data:
+  redis_data:
+  redis_gigavolve:
+  minio_data:
+  input_data:

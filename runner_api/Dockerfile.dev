@@ -24,11 +24,11 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Create directories for GigaEvolve cloning
 RUN mkdir -p /tmp/gigavolve /app/repos && \
-    useradd -m -u 1000 gemluser && \
-    chown -R gemluser:gemluser /app /tmp/gigavolve
+    useradd -m -u 1000 gigaevouser && \
+    chown -R gigaevouser:gigaevouser /app /tmp/gigavolve
 
-# Don't switch to gemluser here - we'll do it in the entrypoint
-# USER gemluser
+# Don't switch to gigaevouser here - we'll do it in the entrypoint
+# USER gigaevouser
 
 # Expose port
 EXPOSE 8001

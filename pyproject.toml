@@ -1,7 +1,7 @@
 [project]
-name = "geml-v0"
+name = "gigaevo-platform"
 version = "0.1.0"
-description = "MetaEvolveML V0 - Machine Learning Experiment Management System"
+description = "GigaEvo Platform - Machine Learning Experiment Management System"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -58,7 +58,7 @@ web = [
     "plotly>=5.0.0",
 ]
 all = [
-    "geml-v0[master,runner,web]",
+    "gigaevo-platform[master,runner,web]",
 ]
 
 [build-system]

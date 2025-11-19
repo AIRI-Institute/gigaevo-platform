@@ -96,13 +96,13 @@ class RunnerInstanceService:
                     {
                         "KAFKA__ENABLED": "true",
                         "KAFKA__BOOTSTRAP_SERVERS": self.config.kafka.bootstrap_servers,
-                        "KAFKA__GROUP_ID": f"geml-runner-{instance_id}",
+                        "KAFKA__GROUP_ID": f"gigaevo-runner-{instance_id}",
                     }
                 )
 
             # Prepare volumes (shared data directory)
             volumes = {
-                "/tmp/geml-data": "/app/data",
+                "/tmp/gigaevo-data": "/app/data",
                 "/tmp/gigavolve": "/tmp/gigavolve",
             }
 

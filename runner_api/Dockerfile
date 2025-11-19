@@ -22,10 +22,10 @@ RUN uv sync
 
 # Create directories for GigaEvolve cloning
 RUN mkdir -p /tmp/gigavolve && \
-    useradd -m -u 1000 gemluser && \
-    chown -R gemluser:gemluser /app /tmp/gigavolve
+    useradd -m -u 1000 gigaevouser && \
+    chown -R gigaevouser:gigaevouser /app /tmp/gigavolve
 
-USER gemluser
+USER gigaevouser
 
 # Expose port
 EXPOSE 8001

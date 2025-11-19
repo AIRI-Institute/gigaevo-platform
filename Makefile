@@ -2,7 +2,7 @@
 
 # Default target
 help:
-	@echo "GEML - MetaEvolveML V0 Commands:"
+	@echo "GigaEvo Platform Commands:"
 	@echo ""
 	@echo "🔧 Development:"
 	@echo "  install                - Install all dependencies"
@@ -51,7 +51,7 @@ prod:
 
 # Deployment (New Kafka Architecture)
 deploy:
-	@echo "🚀 Deploying GEML with Kafka architecture..."
+	@echo "🚀 Deploying GigaEvo Platform with Kafka architecture..."
 	./deploy.sh deploy
 
 deploy-infrastructure:
@@ -67,7 +67,7 @@ deploy-applications:
 	@echo "✅ Applications deployed (Master API, Runner API, Web UI)"
 
 stop:
-	@echo "🛑 Stopping all GEML services..."
+	@echo "🛑 Stopping all GigaEvo Platform services..."
 	./deploy.sh stop
 
 restart:
@@ -108,8 +108,8 @@ test:
 # Database
 db-reset:
 	@echo "🗑️ Dropping and recreating database..."
-	docker compose -f docker-compose.kafka.yml exec postgres psql -U gemluser -d postgres -c "DROP DATABASE IF EXISTS geml_master;"
-	docker compose -f docker-compose.kafka.yml exec postgres psql -U gemluser -d postgres -c "CREATE DATABASE geml_master;"
+	docker compose -f docker-compose.kafka.yml exec postgres psql -U gigaevouser -d postgres -c "DROP DATABASE IF EXISTS gigaevo_master;"
+	docker compose -f docker-compose.kafka.yml exec postgres psql -U gigaevouser -d postgres -c "CREATE DATABASE gigaevo_master;"
 	@echo "✅ Database reset complete"
 
 db-migrate:
@@ -141,6 +141,6 @@ logs-web:
 
 # Service status
 status:
-	@echo "📊 GEML Service Status:"
+	@echo "📊 GigaEvo Platform Service Status:"
 	@echo ""
 	./deploy.sh status

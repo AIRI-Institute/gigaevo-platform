@@ -1,10 +1,10 @@
 # GitHub Personal Access Token (PAT) Setup
 
-This document explains how to configure a GitHub Personal Access Token (PAT) for cloning private repositories in the GEML system.
+This document explains how to configure a GitHub Personal Access Token (PAT) for cloning private repositories in the GigaEvo Platform system.
 
 ## Overview
 
-The GEML Runner API needs to clone the GigaEvolve repository to execute experiments. When the repository is private, authentication is required. This setup allows you to use a GitHub PAT for seamless authentication.
+The GigaEvo Platform Runner API needs to clone the GigaEvolve repository to execute experiments. When the repository is private, authentication is required. This setup allows you to use a GitHub PAT for seamless authentication.
 
 ## Steps
 
@@ -13,7 +13,7 @@ The GEML Runner API needs to clone the GigaEvolve repository to execute experime
 1. Go to GitHub Settings: https://github.com/settings/tokens
 2. Click "Generate new token (classic)"
 3. Fill in the form:
-   - **Note**: Enter a descriptive name (e.g., "GEML Development")
+   - **Note**: Enter a descriptive name (e.g., "GigaEvo Platform Development")
    - **Expiration**: Choose an appropriate expiration period
    - **Scopes**: Check the `repo` scope (this grants access to private repositories)
 4. Click "Generate token"
@@ -87,7 +87,7 @@ If the system falls back to the mock repository:
 2. **Manual test**: Try cloning manually:
 
    ```bash
-   git clone https://YOUR_PAT@github.com/KhrulkovV/metaevolve
+   git clone https://YOUR_PAT@github.com/FusionBrainLab/gigaevo-core
    ```
 
 3. **Network issues**: Check if Docker can access GitHub
@@ -98,8 +98,8 @@ If the system falls back to the mock repository:
 | -------------------- | ---------------------------- | -------- | ----------------------------------------- |
 | `GITHUB_PAT`         | GitHub Personal Access Token | No       | None                                      |
 | `GIGAVOLVE_REPO_URL` | Repository URL to clone      | No       | `https://github.com/FusionBrainLab/gigaevo-core` |
-| `GIT_USER_NAME`      | Git user name for commits    | No       | `GEML Development`                        |
-| `GIT_USER_EMAIL`     | Git user email for commits   | No       | `dev@geml.local`                          |
+| `GIT_USER_NAME`      | Git user name for commits    | No       | `GigaEvo Platform Development`                        |
+| `GIT_USER_EMAIL`     | Git user email for commits   | No       | `dev@gigaevo.local`                          |
 
 ## How It Works
 

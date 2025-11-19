@@ -19,8 +19,8 @@ COPY pyproject.toml .
 RUN uv sync
 
 # Create non-root user
-RUN useradd -m -u 1000 gemluser && chown -R gemluser:gemluser /app
-USER gemluser
+RUN useradd -m -u 1000 gigaevouser && chown -R gigaevouser:gigaevouser /app
+USER gigaevouser
 
 # Expose port
 EXPOSE 8000

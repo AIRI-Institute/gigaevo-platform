@@ -25,11 +25,11 @@ CLAUDE.md
 
 # Cloned repositories
 **/repos/
-*/repos/metaevolve/
+*/repos/gigaevolve-core/
 
 master_api/temp_experiments/*
 !master_api/temp_experiments/.gitkeep
-master_api/geml_master.db
+master_api/gigaevo_master.db
 web_ui/input_data
 
 

@@ -1,4 +1,4 @@
-# GigaEvo (MetaEvolveML V0) - Technical Description
+# GigaEvo (GigaEvo Platform) - Technical Description
 
 ## Executive Summary
 

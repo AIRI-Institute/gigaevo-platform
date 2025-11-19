@@ -22,8 +22,8 @@ services:
       timeout: 10s
       retries: 3
     networks:
-      - geml-network
+      - gigaevo-network
 
 networks:
-  geml-network:
+  gigaevo-network:
     external: true

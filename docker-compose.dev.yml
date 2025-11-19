@@ -5,9 +5,9 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: geml_master
-      POSTGRES_USER: gemluser
-      POSTGRES_PASSWORD: gemlpass
+      POSTGRES_DB: gigaevo_master
+      POSTGRES_USER: gigaevouser
+      POSTGRES_PASSWORD: gigaevopass
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -129,7 +129,7 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE__URL=postgresql+asyncpg://gemluser:gemlpass@postgres:5432/geml_master
+      - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
       - STORAGE__ENDPOINT_URL=http://minio:9000
       - STORAGE__ACCESS_KEY=minioadmin
       - STORAGE__SECRET_KEY=minioadmin

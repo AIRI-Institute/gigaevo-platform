@@ -3,21 +3,21 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: geml_master
-      POSTGRES_USER: gemluser
-      POSTGRES_PASSWORD: gemlpass
+      POSTGRES_DB: gigaevo_master
+      POSTGRES_USER: gigaevouser
+      POSTGRES_PASSWORD: gigaevopass
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gemluser -d geml_master"]
+      test: ["CMD-SHELL", "pg_isready -U gigaevouser -d gigaevo_master"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - geml-network
+      - gigaevo-network
 
   # Zookeeper (required for Kafka)
   zookeeper:
@@ -33,7 +33,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - geml-network
+      - gigaevo-network
 
   # Kafka
   kafka:
@@ -77,7 +77,7 @@ services:
       timeout: 10s
       retries: 5
     networks:
-      - geml-network
+      - gigaevo-network
 
   # Redis for caching and task coordination
   redis:
@@ -92,7 +92,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - geml-network
+      - gigaevo-network
 
   # Redis for GigaEvolve experiments
   redis-gigavolve:
@@ -107,7 +107,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - geml-network
+      - gigaevo-network
 
   # MinIO S3-compatible storage
   minio:
@@ -127,7 +127,7 @@ services:
       timeout: 20s
       retries: 3
     networks:
-      - geml-network
+      - gigaevo-network
 
 volumes:
   postgres_data:
@@ -139,5 +139,5 @@ volumes:
   problems_data:
 
 networks:
-  geml-network:
+  gigaevo-network:
     driver: bridge

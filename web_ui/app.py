@@ -23,7 +23,7 @@ MASTER_API_URL = os.getenv("MASTER_API_URL", "http://localhost:8000")
 # Public URL used by the browser to fetch assets from Master API
 S3_API_URL = os.getenv("S3_API_URL", "http://localhost:9000")
 INPUT_DATA_DIR = os.getenv("INPUT_DATA_DIR", "/app/input_data")
-STORAGE_BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME", "geml-data")
+STORAGE_BUCKET_NAME = os.getenv("STORAGE_BUCKET_NAME", "gigaevo-data")
 _RESOLVED_BUCKET_NAME: Optional[str] = None
 
 

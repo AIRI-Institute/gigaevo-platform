@@ -5,7 +5,7 @@ services:
       context: ./master_api
       dockerfile: Dockerfile
     environment:
-      - DATABASE__URL=postgresql+asyncpg://gemluser:gemlpass@postgres:5432/geml_master
+      - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
       - STORAGE__ENDPOINT_URL=http://minio:9000
       - STORAGE__ACCESS_KEY=minioadmin
       - STORAGE__SECRET_KEY=minioadmin
@@ -34,8 +34,8 @@ services:
       timeout: 10s
       retries: 3
     networks:
-      - geml-network
+      - gigaevo-network
 
 networks:
-  geml-network:
+  gigaevo-network:
     external: true

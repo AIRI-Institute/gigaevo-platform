@@ -1,5 +1,5 @@
 @startuml
-title GEML System Architecture — VMs, Containers & Remote LLM with GigaEvolve Workers
+title GigaEvo Platform System Architecture — VMs, Containers & Remote LLM with GigaEvolve Workers
 
 !theme plain
 
@@ -43,14 +43,14 @@ rectangle "WebUI VM" as vm_web {
 }
 
 ' ========== CLOUD ==========
-cloud "GEML Cloud Infrastructure" as geml_cloud {
+cloud "GigaEvo Platform Cloud Infrastructure" as gigaevo_cloud {
     
     frame "VM: Master API Host" as vm_master {
-        node "Docker Container: GEML Master API" as c_master
+        node "Docker Container: GigaEvo Platform Master API" as c_master
     }
 
     frame "VM: Runner Host" as vm_runner {
-        node "Docker Container: GEML Runner API (Orchestrator)" as c_runner
+        node "Docker Container: GigaEvo Platform Runner API (Orchestrator)" as c_runner
         node "Docker Container: Redis (Task Queue)" as c_redis
         node "Docker Container: GigaEvolve Worker #1 (Python)" as c_worker1
         node "Docker Container: GigaEvolve Worker #2 (Python)" as c_worker2

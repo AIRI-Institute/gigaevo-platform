@@ -25,7 +25,7 @@ class StorageConfig(BaseModel):
     endpoint_url: str = "http://localhost:9000"
     access_key: str = "minioadmin"
     secret_key: str = "minioadmin"
-    bucket_name: str = "geml-data"
+    bucket_name: str = "gigaevo-data"
 
 
 class WorkerConfig(BaseModel):
@@ -42,12 +42,12 @@ class GigaEvolveConfig(BaseModel):
     repo_ref: Optional[str] = "v1.1.0"
     repo_force_refresh: bool = False
     redis_url: str = "redis://redis-gigavolve:6379/0"
-    clone_path: str = "./repos/metaevolve"
+    clone_path: str = "./repos/gigaevo-core"
     python_path: str = "python3"
     experiment_timeout: int = 7200
     github_pat: Optional[str] = None
-    git_user_name: str = "GEML Development"
-    git_user_email: str = "dev@geml.local"
+    git_user_name: str = ""
+    git_user_email: str = ""
     ssl_bypass_enabled: bool = False
     results_collection_interval: int = 10
 

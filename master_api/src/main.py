@@ -19,7 +19,7 @@ service_manager: ServiceManager = None
 _results_ingest_task = None
 
 app = FastAPI(
-    title="GEML Master API", description="Master API for managing experiments and coordinating runners", version="0.1.0"
+    title="GigaEvo Platform Master API", description="Master API for managing experiments and coordinating runners", version="0.1.0"
 )
 
 app.add_middleware(
@@ -122,7 +122,7 @@ async def health_check():
 async def startup_event():
     global service_manager, _results_ingest_task
 
-    logger.info("Starting GEML Master API...")
+    logger.info("Starting GigaEvo Platform Master API...")
 
     # Wait a moment for services to be ready, especially in development
     await asyncio.sleep(2)
@@ -186,7 +186,7 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"Failed to preload example datasets: {e}")
 
-        logger.info("GEML Master API startup completed")
+        logger.info("GigaEvo Platform Master API startup completed")
 
         # Start background results ingestion loop: pulls reports from MinIO and updates DB every 10s
         async def _results_ingest_loop():
@@ -303,7 +303,7 @@ async def startup_event():
             logger.warning(f"Failed to start results ingestion loop: {e}")
 
     except Exception as e:
-        logger.error(f"Failed to start GEML Master API: {e}")
+        logger.error(f"Failed to start GigaEvo Platform Master API: {e}")
         logger.error(f"Service manager will be unavailable. Error details: {str(e)}")
         # Continue anyway so health endpoint can report the error
         # But ensure service_manager remains None to indicate failure
@@ -313,7 +313,7 @@ async def startup_event():
 async def shutdown_event():
     global service_manager, _results_ingest_task
 
-    logger.info("Shutting down GEML Master API...")
+    logger.info("Shutting down GigaEvo Platform Master API...")
 
     # Cancel results ingestion loop if running
     if _results_ingest_task:

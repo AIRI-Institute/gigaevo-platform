@@ -3,16 +3,16 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_DB: geml_master
-      POSTGRES_USER: gemluser
-      POSTGRES_PASSWORD: gemlpass
+      POSTGRES_DB: gigaevo_master
+      POSTGRES_USER: gigaevouser
+      POSTGRES_PASSWORD: gigaevopass
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gemluser -d geml_master"]
+      test: ["CMD-SHELL", "pg_isready -U gigaevouser -d gigaevo_master"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -54,7 +54,7 @@ services:
       context: ./master_api
       dockerfile: Dockerfile
     environment:
-      - DATABASE__URL=postgresql+asyncpg://gemluser:gemlpass@postgres:5432/geml_master
+      - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
       - STORAGE__ENDPOINT_URL=http://minio:9000
       - STORAGE__ACCESS_KEY=minioadmin
       - STORAGE__SECRET_KEY=minioadmin
@@ -135,4 +135,4 @@ volumes:
 
 networks:
   default:
-    name: geml-network
+    name: gigaevo-network

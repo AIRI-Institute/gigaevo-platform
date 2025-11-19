@@ -352,14 +352,14 @@ class GigaEvolveService:
 
     def _ensure_llm_config_file(self, clone_path: Path) -> None:
         """
-        Create/update local LLM Hydra config expected by MetaEvolve:
-          <repo>/config/llm/airi_local.yaml
+        Create/update local LLM Hydra config expected by GigaEvo Core:
+          <repo>/config/llm/custom.yaml
         The config references runtime environment variables, so we do not bake secrets here.
         """
         try:
             llm_dir = clone_path / "config" / "llm"
             llm_dir.mkdir(parents=True, exist_ok=True)
-            cfg_path = llm_dir / "airi_local.yaml"
+            cfg_path = llm_dir / "custom.yaml"
             content = (
                 "# @package _global_\n\n"
                 "llm:\n"
@@ -454,7 +454,7 @@ class GigaEvolveService:
                 f"redis_storage.config.redis_url={cfg.gigavolve.redis_url}",
                 f"problem.dir={problem_dir}",
                 f"max_generations={config.get('max_iterations', None)}",
-                "llm=airi_local",
+                "llm=custom",
             ]
             
             # Prepare environment (LLM base URL and API key)

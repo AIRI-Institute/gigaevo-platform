@@ -14,7 +14,7 @@ class DockerService:
     def __init__(self, config: RunnerInstanceConfig):
         self.config = config
         self.docker_host = config.docker_host
-        self.container_name = f"geml-runner-{config.host.replace('.', '-').replace(':', '-')}"
+        self.container_name = f"gigaevo-runner-{config.host.replace('.', '-').replace(':', '-')}"
         self.endpoint_url = f"http://{config.host}:{config.port}"
 
     async def initialize_container(

@@ -1,7 +1,7 @@
 [project]
 name = "runner-api-tests"
 version = "0.1.0"
-description = "Runner API component tests for GEML"
+description = "Runner API component tests for GigaEvo Platform"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.104.0",

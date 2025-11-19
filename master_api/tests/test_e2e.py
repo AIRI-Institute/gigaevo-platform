@@ -119,7 +119,7 @@ class TestMasterAPIE2E:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["service"] == "GEML Runner API"
+        assert data["service"] == "GigaEvo Platform Runner API"
         logger.info("✅ Runner API health endpoint test passed")
 
     @pytest.mark.asyncio

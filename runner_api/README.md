@@ -1,4 +1,4 @@
-# GEML Runner API
+# GigaEvo Platform Runner API
 
 The Runner API is responsible for executing experiments and managing worker processes. It integrates with the GigaEvolve repository to run machine learning experiments.
 
@@ -15,7 +15,7 @@ The Runner API is responsible for executing experiments and managing worker proc
 The Runner API automatically clones the GigaEvolve repository on startup:
 
 ### Clone Location
-- **Default Path**: `./repos/metaevolve` (relative to the runner_api directory)
+- **Default Path**: `./repos/gigaevo-core` (relative to the runner_api directory)
 - **Configurable**: Can be changed via `GIGAVOLVE__CLONE_PATH` environment variable
 
 ### Clone Behavior
@@ -34,7 +34,7 @@ The Runner API automatically clones the GigaEvolve repository on startup:
 #### Repository Status Response
 ```json
 {
-  "path": "/app/repos/metaevolve",
+  "path": "/app/repos/gigaevo-core",
   "commit_hash": "abc123...",
   "remote_url": "https://github.com/FusionBrainLab/gigaevo-core",
   "branch": "main",
@@ -54,7 +54,7 @@ GIGAVOLVE__REPO_URL=https://github.com/FusionBrainLab/gigaevo-core.git
 GIGAVOLVE__REPO_REF=v1.1.0
 
 # Clone path (relative to runner_api)
-GIGAVOLVE__CLONE_PATH=./repos/metaevolve
+GIGAVOLVE__CLONE_PATH=./repos/gigaevo-core
 
 # Python executable for experiments
 GIGAVOLVE__PYTHON_PATH=python3
@@ -73,7 +73,7 @@ python src/main.py
 
 ### Docker Development
 ```bash
-# The repository will be cloned into the container at /app/repos/metaevolve
+# The repository will be cloned into the container at /app/repos/gigaevo-core
 docker-compose -f docker-compose.dev.yml up runner-api
 ```
 
@@ -103,7 +103,7 @@ runner_api/
 │   ├── main.py                    # FastAPI application
 │   └── config.py                  # Configuration
 ├── repos/                         # Cloned repositories (gitignored)
-│   └── metaevolve/               # GigaEvolve repository
+│   └── gigaevo-core/               # GigaEvo Core repository
 ├── Dockerfile                    # Production container
 ├── Dockerfile.dev               # Development container
 └── requirements.txt             # Python dependencies

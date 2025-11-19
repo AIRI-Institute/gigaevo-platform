@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     global gigavolve_service, _background_worker_task, _background_worker, _results_collection_task
     # Startup
-    logger.info("Starting GEML Runner API...")
+    logger.info("Starting GigaEvo Platform Runner API...")
 
     # Initialize GigaEvolve service
     gigavolve_service = GigaEvolveService()
@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to register ExperimentService: {e}")
 
-    logger.info("GEML Runner API startup complete")
+    logger.info("GigaEvo Platform Runner API startup complete")
 
     # Optionally start a default background worker
     try:
@@ -135,7 +135,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    logger.info("Shutting down GEML Runner API...")
+    logger.info("Shutting down GigaEvo Platform Runner API...")
 
     # Close Experiment service
     try:
@@ -170,7 +170,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="GEML Runner API",
+    title="GigaEvo Platform Runner API",
     description="Runner API for executing experiments and managing workers",
     version="0.1.0",
     lifespan=lifespan,
@@ -194,7 +194,7 @@ async def health_check():
     """Health check endpoint"""
     global gigavolve_service
 
-    health_status = {"status": "healthy", "service": "GEML Runner API", "version": "0.1.0"}
+    health_status = {"status": "healthy", "service": "GigaEvo Platform Runner API", "version": "0.1.0"}
 
     # Check GigaEvolve repository status
     if gigavolve_service:

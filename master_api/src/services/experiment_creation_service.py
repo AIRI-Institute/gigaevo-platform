@@ -43,7 +43,7 @@ class ExperimentCreationService:
             logger.info(f"Creating experiment files for {experiment_id}")
 
             # Create temporary working directory
-            temp_work_dir = os.path.join(self.temp_dir, f"geml_experiment_{experiment_id}")
+            temp_work_dir = os.path.join(self.temp_dir, f"gigaevo_experiment_{experiment_id}")
             os.makedirs(temp_work_dir, exist_ok=True)
 
             # Create spec JSON for folder_constructor
@@ -179,7 +179,7 @@ class ExperimentCreationService:
             # Import the UUID experiment builder function
 
             # Create output directory
-            output_root = os.path.join(self.temp_dir, f"geml_output_{uuid.uuid4().hex[:8]}")
+            output_root = os.path.join(self.temp_dir, f"gigaevo_output_{uuid.uuid4().hex[:8]}")
             os.makedirs(output_root, exist_ok=True)
 
             # Load spec JSON
@@ -218,7 +218,7 @@ class ExperimentCreationService:
             )
 
             # Create output directory
-            output_root = os.path.join(self.temp_dir, f"geml_output_{uuid.uuid4().hex[:8]}")
+            output_root = os.path.join(self.temp_dir, f"gigaevo_output_{uuid.uuid4().hex[:8]}")
             os.makedirs(output_root, exist_ok=True)
 
             # Build command

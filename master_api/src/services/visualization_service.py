@@ -20,7 +20,7 @@ class VisualizationService:
     def __init__(self, storage_service: StorageService, base_local_dir: str = None):
         self.storage_service = storage_service
         # Use system temporary directory instead of /app which might be read-only
-        self.base_local_dir = base_local_dir or os.path.join(tempfile.gettempdir(), "geml_experiments")
+        self.base_local_dir = base_local_dir or os.path.join(tempfile.gettempdir(), "gigaevo_experiments")
         self.config = load_config()
 
     def _ensure_dir(self, path: str) -> None:

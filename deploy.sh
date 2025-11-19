@@ -1,19 +1,19 @@
 #!/bin/bash
 
-# GEML Deployment Script
+# GigaEvo Platform Deployment Script
 # This script sets up the three-tier architecture with Kafka
 
 set -e
 
-echo "🚀 Starting GEML Deployment..."
+echo "🚀 Starting GigaEvo Platform Deployment..."
 
 # Function to check if Docker network exists
 create_network_if_not_exists() {
-    if ! docker network ls | grep -q "geml-network"; then
-        echo "📡 Creating Docker network: geml-network"
-        docker network create geml-network
+    if ! docker network ls | grep -q "gigaevo-network"; then
+        echo "📡 Creating Docker network: gigaevo-network"
+        docker network create gigaevo-network
     else
-        echo "📡 Docker network geml-network already exists"
+        echo "📡 Docker network gigaevo-network already exists"
     fi
 }
 
@@ -73,7 +73,7 @@ start_applications() {
 # Function to show deployment status
 show_status() {
     echo ""
-    echo "🎉 GEML Deployment Complete!"
+    echo "🎉 GigaEvo Platform Deployment Complete!"
     echo ""
     echo "📋 Service URLs:"
     echo "   • Master API:     http://localhost:8000"
@@ -96,7 +96,7 @@ show_status() {
 
 # Function to stop services
 stop_services() {
-    echo "🛑 Stopping all GEML services..."
+    echo "🛑 Stopping all GigaEvo Platform services..."
     docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-api.yml -f docker-compose.web-ui.yml down
     docker compose -f docker-compose.kafka.yml down
     echo "✅ All services stopped"

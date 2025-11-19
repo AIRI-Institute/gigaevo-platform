@@ -33,7 +33,7 @@ services:
       timeout: 10s
       retries: 3
     networks:
-      - geml-network
+      - gigaevo-network
 
 volumes:
   gigavolve_cache:
@@ -41,5 +41,5 @@ volumes:
   problems_data:
 
 networks:
-  geml-network:
+  gigaevo-network:
     external: true

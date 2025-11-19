@@ -31,7 +31,7 @@ async def get_visual_result_image(experiment_id: str):
     """
     # Use system temporary directory instead of /app
     base_dir = tempfile.gettempdir()
-    exp_dir = os.path.join(base_dir, f"geml_experiments_{experiment_id}")
+    exp_dir = os.path.join(base_dir, f"gigaevo_experiments_{experiment_id}")
     os.makedirs(exp_dir, exist_ok=True)
     image_path = os.path.join(exp_dir, "visual_results.jpeg")
 
@@ -59,7 +59,7 @@ async def get_metrics_plot_image(experiment_id: str):
     """Serve metrics plot PNG for the experiment, generating if missing."""
     # Use system temporary directory instead of /app
     base_dir = tempfile.gettempdir()
-    exp_dir = os.path.join(base_dir, f"geml_experiments_{experiment_id}")
+    exp_dir = os.path.join(base_dir, f"gigaevo_experiments_{experiment_id}")
     os.makedirs(exp_dir, exist_ok=True)
     image_path = os.path.join(exp_dir, "metrics_plot.png")
 
@@ -84,7 +84,7 @@ async def get_best_program(experiment_id: str):
     """Serve best program .py from storage; if missing, derive from evolution_report.json and persist."""
     # Use system temporary directory instead of /app
     base_dir = tempfile.gettempdir()
-    exp_dir = os.path.join(base_dir, f"geml_experiments_{experiment_id}")
+    exp_dir = os.path.join(base_dir, f"gigaevo_experiments_{experiment_id}")
     os.makedirs(exp_dir, exist_ok=True)
     program_path = os.path.join(exp_dir, "best_program.py")
 

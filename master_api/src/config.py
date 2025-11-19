@@ -18,7 +18,7 @@ class StorageConfig(BaseModel):
     endpoint_url: str = "http://localhost:9000"
     access_key: str = "minioadmin"
     secret_key: str = "minioadmin"
-    bucket_name: str = "geml-data"
+    bucket_name: str = "gigaevo-data"
 
 
 class RunnerInstanceConfig(BaseModel):
@@ -56,9 +56,9 @@ class RunnerConfig(BaseModel):
     }
 
     # Container configuration
-    image_name: str = "geml-runner-api:latest"
-    container_name_prefix: str = "geml-runner"
-    network_name: str = "geml-network"
+    image_name: str = "gigaevo-runner-api:latest"
+    container_name_prefix: str = "gigaevo-runner"
+    network_name: str = "gigaevo-network"
 
     # Health check settings
     health_check_interval: int = 30  # seconds
@@ -77,7 +77,7 @@ class RunnerConfig(BaseModel):
 class KafkaConfig(BaseModel):
     enabled: bool = True
     bootstrap_servers: str = "localhost:9092"
-    group_id: str = "geml-master-group"
+    group_id: str = "gigaevo-master-group"
     topics: dict = {
         "experiment_config": "experiment-config",
         "experiment_prepared": "experiment-prepared",

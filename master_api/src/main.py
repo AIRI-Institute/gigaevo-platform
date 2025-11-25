@@ -19,7 +19,9 @@ service_manager: ServiceManager = None
 _results_ingest_task = None
 
 app = FastAPI(
-    title="GigaEvo Platform Master API", description="Master API for managing experiments and coordinating runners", version="0.1.0"
+    title="GigaEvo Platform Master API",
+    description="Master API for managing experiments and coordinating runners",
+    version="0.1.0",
 )
 
 app.add_middleware(

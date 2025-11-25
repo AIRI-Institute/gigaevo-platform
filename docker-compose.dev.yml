@@ -13,6 +13,11 @@ services:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gigaevouser -d gigaevo_master"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Redis for task queue
   redis:
@@ -21,6 +26,11 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Redis for GigaEvolve experiments
   redis-gigavolve:
@@ -29,6 +39,11 @@ services:
       - "6380:6379"
     volumes:
       - redis_gigavolve:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Zookeeper (required for Kafka)
   zookeeper:
@@ -120,6 +135,11 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
   # Master API (Development)
   master-api:
@@ -142,11 +162,11 @@ services:
       - "8000:8000"
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
       kafka:
         condition: service_healthy
     volumes:
@@ -162,8 +182,13 @@ services:
         "0.0.0.0",
         "--port",
         "8000",
-        "--reload",
+        "--reload"
       ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Runner API (Development)
   runner-api:
@@ -183,9 +208,12 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - redis
-      - redis-gigavolve
-      - minio
+      redis:
+        condition: service_healthy
+      redis-gigavolve:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       - ./runner_api/src:/app/src
       - ./runner_api/repos:/app/repos
@@ -204,6 +232,11 @@ services:
         "--reload-dir",
         "/app/src",
       ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Web UI (Development)
   web-ui:
@@ -218,10 +251,16 @@ services:
     ports:
       - "7860:7860"
     depends_on:
-      - master-api
+      master-api:
+        condition: service_healthy
     volumes:
       - ./web_ui:/app
     command: ["uv", "run", "python", "app.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:

@@ -456,7 +456,7 @@ class GigaEvolveService:
                 f"max_generations={config.get('max_iterations', None)}",
                 "llm=custom",
             ]
-            
+
             # Prepare environment (LLM base URL and API key)
             env = os.environ.copy()
             # Provide problem directory for exec runner to resolve __file__ when executing user code

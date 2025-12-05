@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
 # Copy application code and pyproject.toml
 COPY src/ ./src/
 COPY data_examples/ ./data_examples/
+COPY prompt_examples/ ./prompt_examples/
 COPY pyproject.toml .
 
 # Install the application using uv

@@ -115,6 +115,11 @@ class ExperimentService:
         try:
             status_str = status.value if status else None
             experiment_models = await self.db_service.list_experiments(status_str, limit, offset)
+
+            # Sync status from Redis to database (runner API is source of truth for running experiments)
+            for model in experiment_models:
+                await self._sync_status_from_redis(model, update_in_place=True)
+
             return [self._model_to_api(model) for model in experiment_models]
         except Exception as e:
             logger.error(f"Failed to list experiments: {e}")
@@ -127,14 +132,10 @@ class ExperimentService:
             if not experiment_model:
                 return None
 
-            # Check cached status if Kafka is available
-            if self.kafka_service:
-                cached_status = await self.kafka_service.get_cached_experiment_status(experiment_id)
-                if cached_status:
-                    # Update model with cached status if it's different
-                    if cached_status.get("status") != experiment_model.status:
-                        experiment_model.status = str(cached_status.get("status"))
-                        experiment_model.updated_at = datetime.fromisoformat(str(cached_status.get("updated_at")))
+            # Sync status from Redis to database (runner API is source of truth for running experiments)
+            if await self._sync_status_from_redis(experiment_model):
+                # Refresh model from database after sync
+                experiment_model = await self.db_service.get_experiment(experiment_id)
 
             return self._model_to_api(experiment_model)
 
@@ -149,13 +150,12 @@ class ExperimentService:
             if not experiment_model:
                 return None
 
-            # Check cached status first
-            if self.kafka_service:
-                cached_status = await self.kafka_service.get_cached_experiment_status(experiment_id)
-                if cached_status:
-                    return cached_status
+            # Sync status from Redis to database (runner API is source of truth for running experiments)
+            if await self._sync_status_from_redis(experiment_model):
+                # Refresh model from database after sync
+                experiment_model = await self.db_service.get_experiment(experiment_id)
 
-            # Return current status from database
+            # Return current status from database (now synced with Redis)
             return {
                 "experiment_id": experiment_id,
                 "status": experiment_model.status,
@@ -599,6 +599,49 @@ class ExperimentService:
         except Exception as e:
             logger.error(f"Failed to drop all experiments: {e}")
             raise
+
+    async def _sync_status_from_redis(self, experiment_model: ExperimentModel, update_in_place: bool = False) -> bool:
+        """
+        Sync experiment status from Redis to database.
+        Returns True if status was synced, False otherwise.
+        If update_in_place is True, updates the model's status field directly.
+        """
+        if not self.kafka_service:
+            return False
+
+        try:
+            cached_status = await self.kafka_service.get_cached_experiment_status(str(experiment_model.id))
+            if not cached_status or not cached_status.get("status"):
+                return False
+
+            redis_status = str(cached_status.get("status"))
+            # Only sync if status differs (avoid unnecessary DB writes)
+            if redis_status == experiment_model.status:
+                return False
+
+            # Update database to match Redis status
+            update_kwargs = {}
+            if cached_status.get("updated_at"):
+                try:
+                    update_kwargs["updated_at"] = datetime.fromisoformat(str(cached_status.get("updated_at")))
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Failed to parse updated_at from Redis for {experiment_model.id}: {e}")
+
+            success = await self.db_service.update_experiment_status(
+                str(experiment_model.id), redis_status, **update_kwargs
+            )
+
+            if success:
+                if update_in_place:
+                    experiment_model.status = redis_status
+                return True
+            else:
+                logger.warning(f"Failed to sync Redis status to database for experiment {experiment_model.id}")
+                return False
+
+        except Exception as sync_error:
+            logger.debug(f"Failed to sync status from Redis for experiment {experiment_model.id}: {sync_error}")
+            return False
 
     def _model_to_api(self, model: ExperimentModel) -> Experiment:
         """Convert database model to API model"""

@@ -87,6 +87,14 @@ class KafkaConfig(BaseModel):
     }
 
 
+class TemplatesConfig(BaseModel):
+    """Paths to external templates for experiment constructors."""
+
+    # Absolute or relative path to prompt templates base directory.
+    # If provided, Master API will use it instead of internal validate_templates.
+    prompt_templates_base: Optional[str] = None
+
+
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_nested_delimiter="__", extra="ignore")
 
@@ -110,6 +118,9 @@ class Config(BaseSettings):
     # Redis (for task queue coordination)
     redis_url: str = "redis://localhost:6379/0"
     timezone: ZoneInfo = ZoneInfo("Europe/Moscow")
+
+    # External templates
+    templates: TemplatesConfig = TemplatesConfig()
 
 
 def load_config(env_file: Optional[str] = None) -> Config:

@@ -577,7 +577,12 @@ class ExperimentService:
         try:
             experiment_id_str = str(experiment_id)
             workspace = self._experiment_workspaces / experiment_id_str
-            log_file = workspace / "experiment.log"
+            
+            # Try evolution.log first (new location)
+            log_file = workspace / "logs" / "evolution.log"
+            if not log_file.exists():
+                # Fallback to old location
+                log_file = workspace / "experiment.log"
 
             if log_file.exists():
                 return await asyncio.to_thread(log_file.read_text)

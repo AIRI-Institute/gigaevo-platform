@@ -24,7 +24,8 @@ class KafkaService:
         """Initialize Kafka producer and Redis connection"""
         try:
             # Initialize Redis connection first (required)
-            self.redis_client = redis.from_url(self.config.redis_url)
+            # Use decode_responses=True to match Runner API format (returns strings, not bytes)
+            self.redis_client = redis.from_url(self.config.redis_url, decode_responses=True)
             await self.redis_client.ping()
             logger.info("Redis connection established")
 
@@ -168,24 +169,21 @@ class KafkaService:
             logger.info("Consumer task ended")
 
     async def cache_experiment_status(self, experiment_id: str, status: Dict[str, Any]):
-        """Cache experiment status in Redis"""
+        """Cache experiment status in Redis as hash (aligned with Runner API format)"""
         if not self.redis_client:
             logger.debug("Redis not available, skipping cache update")
             return
         key = f"experiment:{experiment_id}:status"
-        await self.redis_client.setex(
-            key,
-            3600,  # 1 hour TTL
-            json.dumps(status, ensure_ascii=False),
-        )
+        # Convert all values to strings (Redis hash values must be strings)
+        mapping = {k: str(v) if v is not None else "" for k, v in status.items()}
+        await self.redis_client.hset(key, mapping=mapping)
 
     async def get_cached_experiment_status(self, experiment_id: str) -> Optional[Dict[str, Any]]:
-        """Get cached experiment status from Redis"""
+        """Get cached experiment status from Redis hash (aligned with Runner API format)"""
         if not self.redis_client:
             logger.debug("Redis not available, skipping cache lookup")
             return None
         key = f"experiment:{experiment_id}:status"
-        data = await self.redis_client.get(key)
-        if data:
-            return json.loads(data.decode("utf-8"))
-        return None
+        data = await self.redis_client.hgetall(key)
+        # With decode_responses=True, Redis returns strings directly
+        return data if data else None

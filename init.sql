@@ -1,4 +1,4 @@
--- Initialize database schema for GEML Master API
+-- Initialize database schema for GigaEvo Platform Master API
 -- This script is executed when the PostgreSQL container starts
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

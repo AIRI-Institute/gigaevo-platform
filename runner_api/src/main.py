@@ -45,6 +45,42 @@ async def lifespan(app: FastAPI):
     if clone_success:
         repo_info = await gigavolve_service.get_repository_info()
         logger.info(f"GigaEvolve repository ready: {repo_info}")
+        # Ensure prompt_layout.py exists inside cloned repo
+        # This is handled by _ensure_prompt_layout_file in GigaEvolveService.clone_repository()
+        # which copies from master_api/src/folder_constructor/prompt_layout.py
+        # Additional check here is redundant but kept for backward compatibility
+        try:
+            from pathlib import Path as _Path
+
+            # Use configured source or default to master_api location
+            # In Docker: /app/master_api/src/folder_constructor/prompt_layout.py
+            default_paths = [
+                "/app/master_api/src/folder_constructor/prompt_layout.py",  # Docker path
+            ]
+            src_path = cfg.extras.prompt_layout_source
+            if not src_path:
+                # Try default paths in order
+                for path in default_paths:
+                    if _Path(path).exists():
+                        src_path = path
+                        break
+                if not src_path:
+                    src_path = default_paths[1]  # Fallback to local dev path
+            logger.info(f"Checking prompt_layout_source: {src_path}")
+            sp = _Path(src_path)
+            logger.info(f"Source path exists: {sp.exists()}, path: {src_path}")
+            if sp.exists():
+                # Copy to gigaevo/problems/prompt_layout.py (like custom llm config)
+                dest = _Path(cfg.gigavolve.clone_path) / "gigaevo" / "problems" / "prompt_layout.py"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                import shutil as _shutil
+
+                _shutil.copyfile(str(sp), str(dest))
+                logger.info(f"Copied prompt_layout.py from {src_path} to {dest}")
+            else:
+                logger.warning(f"prompt_layout_source not found: {src_path}")
+        except Exception as _e:
+            logger.error(f"Failed to ensure prompt_layout.py in cloned repo: {_e}", exc_info=True)
     else:
         logger.error("Failed to clone GigaEvolve repository")
 

@@ -8,14 +8,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && pip install uv
 
-# Copy application code and pyproject.toml
-COPY app.py .
+# Copy dependency manifest first (better caching), then install deps
 COPY pyproject.toml .
-
-# Install the application using uv
 RUN uv sync
 
-# Create non-root user
+# Copy application source code
+COPY . .
+
+# Create non-root user and fix ownership
 RUN useradd -m -u 1000 gigaevouser && chown -R gigaevouser:gigaevouser /app
 USER gigaevouser
 
@@ -26,5 +26,4 @@ EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:7860 || exit 1
 
-# Run the application
-CMD ["uv", "run", "python", "app.py"]
+# Run the application - command specified in docker-compose

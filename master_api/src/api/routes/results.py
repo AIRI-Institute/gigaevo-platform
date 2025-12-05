@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
-import io
 import json
 import os
 import tempfile
-import zipfile
 
 from fastapi import APIRouter
 from fastapi.responses import FileResponse, JSONResponse, Response

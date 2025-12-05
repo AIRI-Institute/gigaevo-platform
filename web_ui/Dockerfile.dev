@@ -5,6 +5,7 @@ WORKDIR /app
 # Install system dependencies including development tools
 RUN apt-get update && apt-get install -y \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/* \
     && pip install uv
 
@@ -14,9 +15,16 @@ COPY pyproject.toml .
 # Install the application using uv
 RUN uv sync
 
-# Create non-root user
-RUN useradd -m -u 1000 gigaevouser && chown -R gigaevouser:gigaevouser /app
-USER gigaevouser
+# Copy entrypoint script
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Create directories and user (will be adjusted in entrypoint)
+RUN mkdir -p /app && \
+    useradd -m -u 1000 gigaevouser || true
+
+# Don't switch to gigaevouser here - we'll do it in the entrypoint
+# USER gigaevouser
 
 # Expose port
 EXPOSE 7860
@@ -25,5 +33,7 @@ EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:7860 || exit 1
 
-# Development mode
-CMD ["uv", "run", "python", "app.py"]
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Development mode - command specified in docker-compose

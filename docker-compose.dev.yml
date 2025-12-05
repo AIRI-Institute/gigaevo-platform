@@ -205,6 +205,9 @@ services:
       - GIGAVOLVE__REDIS_URL=redis://redis-gigavolve:6379/0
       - DEBUG=true
       - WORKER__AUTOSTART=true
+      - EXTRAS__PROMPT_LAYOUT_SOURCE=/app/master_api/src/folder_constructor/prompt_layout.py
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
     ports:
       - "8001:8001"
     depends_on:
@@ -217,6 +220,7 @@ services:
     volumes:
       - ./runner_api/src:/app/src
       - ./runner_api/repos:/app/repos
+      - ./master_api/src:/app/master_api/src:ro
       - input_data:/app/input_data
     command:
       [
@@ -248,6 +252,8 @@ services:
     environment:
       - MASTER_API_URL=http://master-api:8000
       - PUBLIC_MASTER_API_URL=http://localhost:8000
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
     ports:
       - "7860:7860"
     depends_on:

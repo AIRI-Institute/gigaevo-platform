@@ -43,7 +43,16 @@ install:
 
 # Development
 dev:
-	docker compose -f docker-compose.dev.yml up --build
+	@echo "🚀 Starting GigaEvo Platform in Development Mode..."
+	@echo ""
+	@echo "📋 Service URLs (will be available after services start):"
+	@echo "   • Master API:     http://localhost:8000"
+	@echo "   • Runner API:     http://localhost:8001"
+	@echo "   • Web UI:         http://localhost:7860"
+	@echo "   • MinIO Console:  http://localhost:9001"
+	@echo "   • Kafka UI:       http://localhost:8080"
+	@echo ""
+	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose -f docker-compose.dev.yml up --build
 
 # Production (legacy - use deploy instead)
 prod:

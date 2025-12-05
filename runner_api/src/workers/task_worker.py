@@ -71,9 +71,12 @@ class TaskWorker:
         redis = await self._get_redis()
         # Blocking pop from right (acts as queue FIFO if producers LPUSH)
         timeout = max(1, int(self.config.worker.polling_interval))
+        logger.debug(f"Worker {self.worker_id} waiting for task from task_queue (timeout={timeout}s)")
         popped = await redis.brpop("task_queue", timeout=timeout)
         if not popped:
+            logger.debug(f"Worker {self.worker_id} no task available after {timeout}s timeout")
             return None
+        logger.info(f"Worker {self.worker_id} got task from queue: {popped}")
         _, task_id = popped
         task_key = f"task:{task_id}"
         data = await redis.hgetall(task_key)
@@ -99,6 +102,7 @@ class TaskWorker:
 
     async def _execute_task(self, task: Task):
         """Execute a task"""
+        logger.info(f"Worker {self.worker_id} executing task {task.id} (type={task.task_type}, experiment={task.experiment_id})")
         self.current_task = task
         self.status = WorkerStatus.BUSY
 
@@ -206,11 +210,14 @@ class TaskWorker:
         """Handle experiment execution task"""
         experiment_id = str(task.experiment_id)
         config = task.parameters.get("config", {})
+        logger.info(f"Processing RUN_EXPERIMENT task for experiment {experiment_id}")
 
         async def _cancel_check() -> bool:
             return await self._is_task_cancelled(str(task.id))
 
+        logger.info(f"Calling gigavolve_service.run_experiment for {experiment_id}")
         result = await self.gigavolve_service.run_experiment(experiment_id, config, cancel_check=_cancel_check)
+        logger.info(f"run_experiment returned for {experiment_id}: {result}")
 
         if result and result.get("success", False):
             task.status = TaskStatus.COMPLETED

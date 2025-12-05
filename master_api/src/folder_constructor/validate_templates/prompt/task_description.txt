@@ -1,0 +1,64 @@
+TASK DEFINITION – PROMPT EVOLUTION AND OPTIMIZATION
+
+Problem Type: Evolutionary Prompt Engineering
+Task Category: ${task_type}
+
+${task_type_description}
+
+Challenge: Design prompt templates that maximize ${metric_name} by improving the LLM's ability to perform ${task_description}.
+
+OBJECTIVE:
+Implement a Python function that defines a prompt template guiding the LLM to perform the target task effectively.
+
+- Output: A `PROMPT_TEMPLATE` string used at runtime to query the model
+- Fitness: Evaluated by ${metric_name}, computed from model responses on evaluation dataset
+- Goal: Maximize the measured ${metric_name}
+
+INPUT–OUTPUT CONTEXT:
+- **Input**: Each data sample is a dictionary containing input fields:
+${input_fields}
+- **Output**: The LLM's generated ${output_type}
+- **Runtime constraint**: Maximum cost of 1.0 dollars per LLM call
+
+CONSTRAINTS:
+- Must define `PROMPT_TEMPLATE: str`
+- Required input fields (${required_fields_text}) MUST be explicitly referenced as placeholders within the `PROMPT_TEMPLATE` (1 or more times); each will be automatically substituted at runtime
+- Output format specification: ${output_specification}
+
+FAILURE MODES:
+- **Under-specification**: ambiguous or missing instructions cause inconsistent responses
+- **Overconstraint**: excessive rigidity limits reasoning or creativity
+- **Ineffective reasoning**: LLM skips intermediate steps or outputs incoherent answers
+- **Token inefficiency**: prompts too verbose or redundant reduce performance
+
+PROBLEM COMPLEXITY:
+Prompt optimization is a non-linear, high-dimensional search problem. Small wording or structural variations can yield large differences in LLM reasoning quality and response accuracy. Effective solutions must balance clarity, reasoning guidance, and output specification while respecting token and format constraints.
+
+EVALUATION FRAMEWORK:
+- Prompt performance evaluated via ${metric_name} and auxiliary metrics
+- Fitness = aggregate ${metric_name} across dataset
+- Higher fitness → better prompt
+- Aim for continuous improvement over baseline performance
+
+OUTPUT FORMAT:
+
+The entrypoint function and imports are FIXED and must NOT be changed:
+```python
+from helper import run_agent
+
+# EVOLVE-BLOCK-START
+
+PROMPT_TEMPLATE: str = """Your prompt template here with {field_name} for each input field."""
+
+# EVOLVE-BLOCK-END
+
+def entrypoint(context):
+    return run_agent(PROMPT_TEMPLATE, context)
+```
+
+**Critical:**
+- Only code inside EVOLVE-BLOCK-START and EVOLVE-BLOCK-END can be modified
+- DO NOT remove the EVOLVE-BLOCK-START fences
+- Must define `PROMPT_TEMPLATE: str` inside the evolve block
+- Reference input fields as `{field_name}` - they will be substituted at runtime
+- The `entrypoint` function and imports must remain UNCHANGED

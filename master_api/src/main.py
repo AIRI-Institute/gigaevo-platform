@@ -188,6 +188,37 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"Failed to preload example datasets: {e}")
 
+        # Preload local prompt preset datasets to storage under prompt_data/
+        try:
+            storage = service_manager.get_storage_service()
+            here = os.path.dirname(__file__)
+            presets_dir = os.path.normpath(os.path.join(here, "..", "prompt_examples"))
+            if os.path.isdir(presets_dir):
+                uploaded = 0
+                for name in sorted(os.listdir(presets_dir)):
+                    pdir = os.path.join(presets_dir, name)
+                    if not os.path.isdir(pdir):
+                        continue
+                    train_csv = os.path.join(pdir, "dataset", "train.csv")
+                    if not os.path.exists(train_csv):
+                        continue
+                    object_name = f"prompt_data/{name}/train.csv"
+                    try:
+                        exists = await storage.object_exists(object_name)
+                    except Exception:
+                        exists = False
+                    if exists:
+                        continue
+                    ok = await storage.upload_file(
+                        train_csv, object_name, metadata={"source": "local_prompt_preset", "example_name": name}
+                    )
+                    if ok:
+                        uploaded += 1
+                if uploaded:
+                    logger.info(f"Preloaded {uploaded} local prompt preset dataset(s) into storage")
+        except Exception as e:
+            logger.warning(f"Failed to preload local prompt preset datasets: {e}")
+
         logger.info("GigaEvo Platform Master API startup completed")
 
         # Start background results ingestion loop: pulls reports from MinIO and updates DB every 10s

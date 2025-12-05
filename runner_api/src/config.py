@@ -51,6 +51,10 @@ class GigaEvolveConfig(BaseModel):
     ssl_bypass_enabled: bool = False
     results_collection_interval: int = 10
 
+class ExtrasConfig(BaseModel):
+    """Optional extra paths/hooks"""
+    # Absolute path to prompt_layout.py to copy into cloned repo if missing
+    prompt_layout_source: Optional[str] = None
 
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_nested_delimiter="__", extra="ignore")
@@ -70,6 +74,8 @@ class Config(BaseSettings):
     # GigaEvolve configuration
     gigavolve: GigaEvolveConfig = GigaEvolveConfig()
 
+    # Extras
+    extras: ExtrasConfig = ExtrasConfig()
     # Runner API
     host: str = "0.0.0.0"
     port: int = 8001

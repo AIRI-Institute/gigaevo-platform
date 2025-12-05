@@ -103,7 +103,6 @@ class TestMasterAPIE2E:
     async def test_master_api_health_endpoint(self, client: E2ETestClient):
         """Test Master API health endpoint"""
         response = await client.master_client.get("/health")
-
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"

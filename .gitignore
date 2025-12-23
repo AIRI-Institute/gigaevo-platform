@@ -12,6 +12,7 @@ wheels/
 input_data/*
 uv.lock
 .env
+llm_models.yml
 
 .aider*
 .DS_store

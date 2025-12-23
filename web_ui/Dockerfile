@@ -2,6 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app
+
 # Install system dependencies and uv
 RUN apt-get update && apt-get install -y \
     curl \
@@ -9,11 +11,14 @@ RUN apt-get update && apt-get install -y \
     && pip install uv
 
 # Copy dependency manifest first (better caching), then install deps
-COPY pyproject.toml .
+COPY web_ui/pyproject.toml ./pyproject.toml
 RUN uv sync
 
 # Copy application source code
-COPY . .
+COPY web_ui/ ./
+
+# Shared code
+COPY common/ ./common/
 
 # Create non-root user and fix ownership
 RUN useradd -m -u 1000 gigaevouser && chown -R gigaevouser:gigaevouser /app

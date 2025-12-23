@@ -51,8 +51,8 @@ services:
   # Master API
   master-api:
     build:
-      context: ./master_api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: master_api/Dockerfile
     environment:
       - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
       - STORAGE__ENDPOINT_URL=http://minio:9000
@@ -71,7 +71,8 @@ services:
         condition: service_healthy
     volumes:
       - input_data:/app/input_data
-    healthcheck:
+      - ./llm_models.yml:/llm_models.yml:ro
+      healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
@@ -80,8 +81,8 @@ services:
   # Runner API
   runner-api:
     build:
-      context: ./runner_api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: runner_api/Dockerfile
     env_file:
       - .env
     environment:
@@ -99,7 +100,8 @@ services:
     volumes:
       - gigavolve_cache:/tmp/gigavolve
       - input_data:/app/input_data
-    healthcheck:
+      - ./llm_models.yml:/llm_models.yml:ro
+      healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
@@ -108,8 +110,8 @@ services:
   # Web UI
   web-ui:
     build:
-      context: ./web_ui
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: web_ui/Dockerfile
     environment:
       - MASTER_API_URL=http://master-api:8000
     ports:
@@ -119,7 +121,8 @@ services:
         condition: service_healthy
     volumes:
       - input_data:/app/input_data
-    healthcheck:
+      - ./llm_models.yml:/llm_models.yml:ro
+      healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7860"]
       interval: 30s
       timeout: 10s

@@ -126,7 +126,7 @@ class TestMasterAPIE2E:
         """Test experiment creation"""
         experiment_data = await self.create_experiment_sample()
 
-        response = await client.master_client.post("/api/v1/experiments/", json=experiment_data)
+        response = await client.master_client.post("/api/v1/experiments/ml", json=experiment_data)
 
         assert response.status_code == 200
         experiment = response.json()
@@ -310,7 +310,7 @@ class TestMasterAPIE2E:
             "data_path": "/tmp/custom_test_data.csv",
         }
 
-        response = await client.master_client.post("/api/v1/experiments/", json=custom_config)
+        response = await client.master_client.post("/api/v1/experiments/ml", json=custom_config)
 
         assert response.status_code == 200
         experiment = response.json()
@@ -365,7 +365,7 @@ class TestMasterAPIE2E:
             experiment_data = await self.create_experiment_sample()
             experiment_data["name"] = f"E2E Multi Test Experiment {i + 1}"
 
-            response = await client.master_client.post("/api/v1/experiments/", json=experiment_data)
+            response = await client.master_client.post("/api/v1/experiments/ml", json=experiment_data)
             assert response.status_code == 200
             experiments.append(response.json())
 

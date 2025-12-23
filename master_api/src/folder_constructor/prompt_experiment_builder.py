@@ -8,6 +8,21 @@ from pathlib import Path
 from string import Template
 from typing import Any, Dict, Optional
 
+import pandas as pd
+
+# Metric descriptions for task_description.txt
+METRIC_DESCRIPTIONS = {
+    # Binary metrics
+    "exact_match": "binary accuracy based on exact string equality",
+    "substring": "binary accuracy based on prediction containment in ground truth",
+    # Continuous metrics (uppercase format)
+    "ROUGE-1": "unigram overlap score",
+    "ROUGE-2": "bigram overlap score",
+    "ROUGE-L": "longest common subsequence score",
+    "BERTScore": "semantic similarity using BERT embeddings",
+    "BLEU": "n-gram precision score with brevity penalty",
+}
+
 
 def _ensure_dir(path: Path) -> None:
     """Create directory if it doesn't exist."""
@@ -78,69 +93,66 @@ def build_prompt_experiment(
     description: str = spec.get("description") or ""
     base_prompt: str = spec.get("base_prompt") or ""
     llm_model: str = spec.get("llm_model") or "local-inference"
+    prompt_llm_model: str = spec.get("prompt_llm_model") or ""
     max_iterations: int = int(spec.get("max_iterations") or 100)
     validation_criteria: Dict[str, Any] = spec.get("validation_criteria") or {}
-
-    # Derive metric placeholders based on validation criteria
-    metric_import: str = ""
-    custom_metric_impl: str = ""
-    metric_fn: str = "accuracy_score"
-    failure_value: str | int | float | None = None
-    failure_replacement: str | int | float | None = None
-
-    # Determine agent class and metric based on task_type or validation_criteria
-    task_type = spec.get("task_type") or ""
-    vtype = str(validation_criteria.get("validation_type") or "").lower()
 
     # Extract required fields from base_prompt
     placeholder_pattern = r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}"
     required_fields = set(re.findall(placeholder_pattern, base_prompt))
     required_fields_set_str = ", ".join([f'"{f}"' for f in sorted(required_fields)])
 
-    # Determine agent class based on task_type
-    if task_type == "multi_choice" or (not task_type and "options" in required_fields):
-        agent_class = "MultiChoiceAgent"
-    elif task_type == "classification":
-        agent_class = "ClassificationAgent"
-    elif task_type == "math":
-        agent_class = "BoxedAnswerAgent"
-    elif task_type == "summarization":
-        agent_class = "SummarizationAgent"
-    else:
-        # Default to MultiChoiceAgent if unknown
-        agent_class = "MultiChoiceAgent"
+    # Extract validation criteria fields
+    validation_type = validation_criteria.get("validation_type") or "Binary (0/1)"
+    binary_method = validation_criteria.get("binary_method") or "equality"
+    continuous_metric = validation_criteria.get("continuous_metric") or "ROUGE-L"
+    regexp_pattern = validation_criteria.get("regexp_pattern") or ""
 
-    # Determine metric based on validation type
-    if vtype.startswith("binary"):
-        # Binary classification defaults
-        metric_import = "from sklearn.metrics import accuracy_score"
-        metric_fn = "accuracy_score"
-        failure_value = -1.0
-        failure_replacement = 0.0
-        metric_name = "Accuracy"
+    # Default regexp pattern if not provided: Answer:\s*(.+?)$
+    if not regexp_pattern:
+        regexp_pattern = r"Answer:\s*(.+?)$"
+
+    failure_value: float = -1.0
+    failure_replacement: str = ""
+    if validation_type == "Binary (0/1)":
+        metric: str = "exact_match" if binary_method == "equality" else binary_method
+    else:  # Continuous (0..1)
+        metric: str = continuous_metric
+
+    # Generate metric_description for task context
+    metric_description: str = METRIC_DESCRIPTIONS.get(metric, metric)
+
+    # Generate input_fields description - list ALL available fields (except target) with dtype
+    try:
+        df = pd.read_csv(dataset_target)
+        input_columns = [col for col in df.columns if col != target_column]
+        input_fields_lines = []
+        for col in sorted(input_columns):
+            dtype_str = str(df[col].dtype)
+            input_fields_lines.append(f"  - `{col}` ({dtype_str})")
+        input_fields: str = "\n".join(input_fields_lines) if input_fields_lines else "  - (no additional fields)"
+    except Exception:
+        # Fallback if dataset cannot be read
+        input_fields = "\n".join([f"  - `{f}`" for f in sorted(required_fields)])
+
+    # Generate required_fields_text - comma-separated fields that MUST be in prompt
+    required_fields_text: str = ", ".join([f"`{f}`" for f in sorted(required_fields)])
+
+    # Generate optional_fields_text - comma-separated fields that CAN be used
+    try:
+        all_available_fields = set(input_columns)  # Already computed from df.columns
+        optional_fields = all_available_fields - required_fields
+        optional_fields_text: str = ", ".join([f"`{f}`" for f in sorted(optional_fields)])
+        if not optional_fields_text:
+            optional_fields_text = ""
+    except Exception:
+        optional_fields_text = ""
+
+    # Generate output_specification based on regexp_pattern
+    if regexp_pattern:
+        output_specification: str = f"The LLM final output must match the extraction pattern: `{regexp_pattern}`"
     else:
-        # Continuous proxy metric (lightweight ROUGE-L-like token set similarity)
-        metric_import = ""
-        metric_fn = "rouge_l_score"
-        custom_metric_impl = r"""
-def rouge_l_score(references, predictions):
-    import re
-    def _token_set_similarity(a: str, b: str) -> float:
-        ta = {t for t in re.findall(r"\w+", str(a).lower()) if t}
-        tb = {t for t in re.findall(r"\w+", str(b).lower()) if t}
-        if not ta or not tb:
-            return 0.0
-        inter = len(ta & tb)
-        union = len(ta | tb)
-        return inter / union if union else 0.0
-    scores = []
-    for ref, pred in zip(references, predictions):
-        scores.append(_token_set_similarity(ref, pred))
-    return sum(scores) / len(scores) if scores else 0.0
-""".strip("\n")
-        failure_value = None
-        failure_replacement = None
-        metric_name = "ROUGE-L"
+        output_specification = "Free-form output (no extraction pattern specified)."
 
     placeholders: Dict[str, Any] = {
         "experiment_id": exp_uuid,
@@ -152,14 +164,19 @@ def rouge_l_score(references, predictions):
         "base_prompt": base_prompt,
         "llm_model": llm_model,
         "max_iterations": str(max_iterations),
-        "metric_import": metric_import,
-        "custom_metric_impl": custom_metric_impl,
-        "metric_fn": metric_fn,
-        "metric_name": metric_name,
-        "failure_value": failure_value if failure_value is not None else "None",
-        "failure_replacement": failure_replacement if failure_replacement is not None else "None",
         "required_fields_set": required_fields_set_str,
-        "agent_class": agent_class,
+        # Validation criteria placeholders
+        "validation_type": validation_type,
+        "metric": metric,  # Unified metric name (exact_match, substring, rouge1, etc.)
+        "metric_description": metric_description,
+        "regexp_pattern": regexp_pattern,
+        "failure_value": failure_value if failure_value is not None else "None",
+        "failure_replacement": f'"{failure_replacement}"' if failure_replacement is not None else "None",
+        # Task description placeholders
+        "input_fields": input_fields,
+        "required_fields_text": required_fields_text,
+        "optional_fields_text": optional_fields_text,
+        "output_specification": output_specification,
     }
 
     # Render template files into the problem directory
@@ -190,6 +207,7 @@ def rouge_l_score(references, predictions):
         "target_column": target_column,
         "dataset_path": "dataset/data.csv",
         "llm_model": llm_model,
+        **({"prompt_llm_model": prompt_llm_model} if prompt_llm_model else {}),
         "max_iterations": max_iterations,
         "validation_criteria": validation_criteria,
     }

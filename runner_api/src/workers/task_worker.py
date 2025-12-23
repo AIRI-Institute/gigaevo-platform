@@ -102,7 +102,9 @@ class TaskWorker:
 
     async def _execute_task(self, task: Task):
         """Execute a task"""
-        logger.info(f"Worker {self.worker_id} executing task {task.id} (type={task.task_type}, experiment={task.experiment_id})")
+        logger.info(
+            f"Worker {self.worker_id} executing task {task.id} (type={task.task_type}, experiment={task.experiment_id})"
+        )
         self.current_task = task
         self.status = WorkerStatus.BUSY
 

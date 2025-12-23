@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -24,6 +24,9 @@ class ExperimentConfig(BaseModel):
     description: Optional[str] = None
     parameters: Dict[str, Any] = Field(default_factory=dict)
     llm_model: str = "local-inference"
+    prompt_llm_model: Optional[str] = Field(
+        None, description="Optional separate model id for PROMPT_* variables (prompt templates)"
+    )
     max_iterations: int = 100
     timeout_seconds: int = 3600
 
@@ -31,14 +34,18 @@ class ExperimentConfig(BaseModel):
 class PromptValidationCriteria(BaseModel):
     """Validation criteria for prompt experiments."""
 
-    validation_type: str = Field(..., description="Binary (0/1) or Continuous (0..1)")
-    binary_method: Optional[str] = Field(
-        None, description="Method for binary validation: equality, occurrence of a substring, RegExp"
+    validation_type: Literal["Binary (0/1)", "Continuous (0..1)"] = Field(
+        ..., description="Binary (0/1) or Continuous (0..1)"
     )
-    regexp_pattern: Optional[str] = Field(None, description="Regular expression pattern for substring matching")
-    continuous_metric: Optional[str] = Field(
+    binary_method: Optional[Literal["equality", "substring", "regexp"]] = Field(
+        None, description="Method for binary validation: equality, substring, or regexp"
+    )
+    regexp_pattern: Optional[str] = Field(
+        None, description="Regular expression pattern to extract answer from LLM output"
+    )
+    continuous_metric: Optional[Literal["ROUGE-1", "ROUGE-2", "ROUGE-L", "BERTScore", "BLEU"]] = Field(
         None,
-        description="Metric for continuous validation: ROUGE-1, ROUGE-2, ROUGE-L, ROUGE-Lsum, METEOR, BERTScore, AlignScore",
+        description="Metric for continuous validation: ROUGE-1, ROUGE-2, ROUGE-L, BERTScore, BLEU",
     )
 
 
@@ -51,16 +58,14 @@ class PromptExperimentCreate(BaseModel):
     target_column: str = Field(..., description="Target column to predict")
     base_prompt: str = Field(..., description="Base prompt template with {column} placeholders")
 
-    # TEMPORARY: Support both simplified task_type and complex validation_criteria
-    # FUTURE: Make validation_criteria required and remove task_type when needed
-    task_type: Optional[str] = Field(
-        None, description="TEMPORARY: Task type (classification, multi_choice, math, summarization)"
-    )
-    validation_criteria: Optional[PromptValidationCriteria] = Field(
-        None, description="FUTURE: Validation criteria configuration"
+    validation_criteria: PromptValidationCriteria = Field(
+        ..., description="Validation criteria configuration"
     )
 
     llm_model: str = Field("local-inference", description="LLM model to use for prompt evolution")
+    prompt_llm_model: Optional[str] = Field(
+        None, description="Optional separate model id for PROMPT_* variables (prompt templates)"
+    )
     max_iterations: int = Field(100, ge=1, le=1000, description="Maximum number of evolution iterations")
 
     class Config:
@@ -70,16 +75,12 @@ class PromptExperimentCreate(BaseModel):
                 "description": "Analyze customer reviews to predict sentiment",
                 "data_path": "data/customer_reviews.csv",
                 "target_column": "sentiment",
-                "base_prompt": "You are a sentiment analyst. Review: {review_text} Rating: {rating} Category: {product_category} Sentiment:",
-                # TEMPORARY: Simplified task_type example
-                "task_type": "classification",
-                # FUTURE: complex validation criteria example
-                # "validation_criteria": {
-                #     "validation_type": "Binary (0/1)",
-                #     "binary_method": "equality",
-                #     "regexp_pattern": None,
-                #     "continuous_metric": None
-                # },
+                "base_prompt": "You are a sentiment analyst. Review: {review_text} Rating: {rating} Category: {product_category}\nAnswer:",
+                "validation_criteria": {
+                    "validation_type": "Binary (0/1)",
+                    "binary_method": "equality",
+                    "regexp_pattern": "Answer:\\s*(.+?)$",
+                },
                 "llm_model": "local-inference",
                 "max_iterations": 100,
             }

@@ -1,4 +1,4 @@
-.PHONY: help install dev prod clean lint format test docker-build docker-up docker-down deploy-infrastructure deploy-applications
+.PHONY: help install dev prod clean lint format test docker-build docker-up docker-down deploy-infrastructure deploy-applications check-secrets
 
 # Default target
 help:
@@ -37,12 +37,27 @@ help:
 	@echo "  format                - Format code"
 	@echo "  test                  - Run tests"
 
+# Check for required configuration file
+check-secrets:
+	@if [ ! -f llm_models.yml ]; then \
+		echo "❌ ERROR: llm_models.yml not found!"; \
+		echo ""; \
+		echo "This file contains model definitions and API keys for LLM models and is required to run the platform."; \
+		echo "Please create it from the example:"; \
+		echo "  cp llm_models.yml.example llm_models.yml"; \
+		echo ""; \
+		echo "Then edit llm_models.yml and replace REPLACE_ME with your actual API keys."; \
+		echo ""; \
+		exit 1; \
+	fi
+	@echo "✅ llm_models.yml found"
+
 # Installation
 install:
 	pip install -e ".[all]"
 
 # Development
-dev:
+dev: check-secrets
 	@echo "🚀 Starting GigaEvo Platform in Development Mode..."
 	@echo ""
 	@echo "📋 Service URLs (will be available after services start):"
@@ -55,11 +70,11 @@ dev:
 	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose -f docker-compose.dev.yml up --build
 
 # Production (legacy - use deploy instead)
-prod:
+prod: check-secrets
 	docker compose up --build -d
 
 # Deployment (New Kafka Architecture)
-deploy:
+deploy: check-secrets
 	@echo "🚀 Deploying GigaEvo Platform with Kafka architecture..."
 	./deploy.sh deploy
 
@@ -68,7 +83,7 @@ deploy-infrastructure:
 	docker compose -f docker-compose.kafka.yml up -d
 	@echo "✅ Infrastructure deployed (PostgreSQL, Kafka, Redis, MinIO)"
 
-deploy-applications:
+deploy-applications: check-secrets
 	@echo "🎯 Deploying application services..."
 	docker compose -f docker-compose.master-api.yml up -d --build
 	docker compose -f docker-compose.runner-api.yml up -d --build
@@ -90,7 +105,7 @@ restart:
 docker-build:
 	docker compose build
 
-docker-up:
+docker-up: check-secrets
 	docker compose up -d
 
 docker-down:

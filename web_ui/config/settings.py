@@ -51,10 +51,6 @@ STATUS_COLORS: Dict[str, str] = {
 CLASSIFICATION_TARGET_EXAMPLES = ["label", "target", "species", "churn"]
 REGRESSION_TARGET_EXAMPLES = ["price", "age", "income", "target"]
 
-# Available LLM models
-AVAILABLE_LLM_MODELS = [
-    "gigachat-max-2",
-]
 
 # Task types
 TASK_TYPES = ["classification", "regression", "clustering"]

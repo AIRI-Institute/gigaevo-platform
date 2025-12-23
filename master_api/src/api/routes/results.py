@@ -223,7 +223,6 @@ async def download_results_archive(experiment_id: str):
         return JSONResponse({"error": "service_manager_not_initialized"}, status_code=503)
 
     storage = _service_manager.get_storage_service()
-    db: DatabaseService = _service_manager.get_db_service()
 
     try:
         # Stream prebuilt archive from storage

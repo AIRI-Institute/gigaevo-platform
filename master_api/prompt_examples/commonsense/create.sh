@@ -13,4 +13,5 @@ python -m tools.prompt_wizard "commonsense" \
     --task-description "commonsense reasoning by selecting the correct multiple-choice answer (A-E) based on question" \
     --dataset-path problems/promptevolve/examples/commonsense/dataset/train.csv \
     --target-field target \
+    --regexp-pattern "Answer:\s*([A-E])" \
     --overwrite

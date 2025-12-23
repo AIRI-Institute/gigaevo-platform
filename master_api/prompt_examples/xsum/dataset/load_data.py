@@ -1,20 +1,17 @@
-from datasets import load_dataset
 import pandas as pd
+from datasets import load_dataset
 
 
-def create_xsum(data_path='train.csv', test_path='val.csv', n_samples=600, seed=42):
+def create_xsum(data_path="train.csv", test_path="val.csv", n_samples=600, seed=42):
     """Load and prepare XSum dataset for summarization task."""
-    dataset = load_dataset('EdinburghNLP/xsum')
-    train_data = dataset['train']
+    dataset = load_dataset("EdinburghNLP/xsum")
+    train_data = dataset["train"]
 
     sampled_data = train_data.shuffle(seed=seed).select(range(min(n_samples, len(train_data))))
 
     formatted_data = []
     for item in sampled_data:
-        formatted_data.append({
-            'article': item['document'],
-            'target': item['summary']
-        })
+        formatted_data.append({"article": item["document"], "target": item["summary"]})
 
     df = pd.DataFrame(formatted_data)
 

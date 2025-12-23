@@ -47,7 +47,7 @@ class ExperimentManager:
             if "n_clusters" in params:
                 payload["n_clusters"] = params["n_clusters"]
 
-            response = requests.post(f"{self.base_url}/api/v1/experiments/", json=payload, timeout=self.timeout)
+            response = requests.post(f"{self.base_url}/api/v1/experiments/ml", json=payload, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -174,9 +174,7 @@ class ExperimentManager:
         """
         try:
             response = requests.post(
-                f"{self.base_url}/api/v1/experiments/prompts",
-                json=prompt_experiment_data,
-                timeout=self.timeout
+                f"{self.base_url}/api/v1/experiments/prompts", json=prompt_experiment_data, timeout=self.timeout
             )
             response.raise_for_status()
             return response.json()
@@ -250,12 +248,12 @@ class ExperimentManager:
             error_msg = f"Cannot connect to Master API at {self.base_url}. Please ensure the service is running: {e}"
             logger.error(error_msg)
             # Return a special error indicator that can be used by UI components
-            return [{"name": "CONNECTION_ERROR", "label": f"⚠️ Cannot connect to Master API", "error": str(e)}]
+            return [{"name": "CONNECTION_ERROR", "label": "⚠️ Cannot connect to Master API", "error": str(e)}]
 
         except requests.exceptions.Timeout as e:
             error_msg = f"Connection timeout to Master API at {self.base_url}: {e}"
             logger.error(error_msg)
-            return [{"name": "TIMEOUT_ERROR", "label": f"⏰ API connection timeout", "error": str(e)}]
+            return [{"name": "TIMEOUT_ERROR", "label": "⏰ API connection timeout", "error": str(e)}]
 
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code if e.response else "unknown"
@@ -266,12 +264,12 @@ class ExperimentManager:
         except requests.RequestException as e:
             error_msg = f"Failed to list examples from Master API: {e}"
             logger.error(error_msg)
-            return [{"name": "REQUEST_ERROR", "label": f"❌ API request failed", "error": str(e)}]
+            return [{"name": "REQUEST_ERROR", "label": "❌ API request failed", "error": str(e)}]
 
         except Exception as e:
             error_msg = f"Unexpected error listing examples: {e}"
             logger.error(error_msg)
-            return [{"name": "UNEXPECTED_ERROR", "label": f"💥 Unexpected error", "error": str(e)}]
+            return [{"name": "UNEXPECTED_ERROR", "label": "💥 Unexpected error", "error": str(e)}]
 
     def test_api_connection(self) -> Dict[str, Any]:
         """Test connectivity to the Master API.
@@ -294,7 +292,7 @@ class ExperimentManager:
                 "message": f"✅ Successfully connected to Master API at {self.base_url}",
                 "api_url": self.base_url,
                 "examples_count": len(examples_data.get("examples", [])),
-                "examples": examples_data.get("examples", [])
+                "examples": examples_data.get("examples", []),
             }
 
         except requests.exceptions.ConnectionError as e:
@@ -303,7 +301,7 @@ class ExperimentManager:
                 "message": f"❌ Cannot connect to Master API at {self.base_url}. Make sure the service is running.",
                 "api_url": self.base_url,
                 "error": str(e),
-                "suggestion": "Run 'make dev' to start all services"
+                "suggestion": "Run 'make dev' to start all services",
             }
         except requests.exceptions.Timeout as e:
             return {
@@ -311,7 +309,7 @@ class ExperimentManager:
                 "message": f"⏰ Connection timeout to Master API at {self.base_url}. Service may be starting up.",
                 "api_url": self.base_url,
                 "error": str(e),
-                "suggestion": "Wait a moment and try again"
+                "suggestion": "Wait a moment and try again",
             }
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code if e.response else "unknown"
@@ -320,14 +318,14 @@ class ExperimentManager:
                 "message": f"🔥 HTTP {status_code} error from Master API",
                 "api_url": self.base_url,
                 "status_code": status_code,
-                "error": str(e)
+                "error": str(e),
             }
         except Exception as e:
             return {
                 "status": "unexpected_error",
-                "message": f"💥 Unexpected error testing API connection",
+                "message": "💥 Unexpected error testing API connection",
                 "api_url": self.base_url,
-                "error": str(e)
+                "error": str(e),
             }
 
     def get_example_spec(self, name: str) -> Optional[Dict[str, Any]]:
@@ -501,6 +499,7 @@ class ExperimentManager:
         except requests.RequestException as e:
             logger.error(f"Failed to upload local prompt preset dataset {name}: {e}")
             return {"error": str(e)}
+
     # Local prompt presets (master_api/prompt_examples)
     def list_local_prompt_presets(self) -> List[Dict[str, str]]:
         """List local prompt presets discovered by Master API."""

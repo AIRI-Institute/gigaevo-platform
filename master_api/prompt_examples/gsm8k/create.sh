@@ -12,4 +12,5 @@ python -m tools.prompt_wizard "gsm8k" \
     --task-description "math word problem solving by computing the correct numerical answer" \
     --dataset-path problems/promptevolve/examples/gsm8k/dataset/train.csv \
     --target-field target \
+    --regexp-pattern "Answer:\s*([^\n]+)" \
     --overwrite

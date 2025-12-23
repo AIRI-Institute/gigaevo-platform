@@ -252,6 +252,25 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
+def validate_regexp_pattern(pattern: str) -> Tuple[bool, Optional[str]]:
+    """Validate regular expression pattern.
+
+    Args:
+        pattern: Regular expression pattern to validate
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not pattern or not pattern.strip():
+        return False, "RegExp pattern is required when using regexp validation method"
+
+    try:
+        re.compile(pattern)
+        return True, None
+    except re.error as e:
+        return False, f"Invalid RegExp pattern: {str(e)}"
+
+
 def validate_file_upload(file_path: str, allowed_types: List[str]) -> Tuple[bool, Optional[str]]:
     """Validate uploaded file.
 

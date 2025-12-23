@@ -2,6 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app
+
 # Install system dependencies and uv
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -14,8 +16,11 @@ RUN apt-get update && apt-get install -y \
     && pip install uv
 
 # Copy application code and pyproject.toml
-COPY src/ ./src/
-COPY pyproject.toml .
+COPY runner_api/src/ ./src/
+COPY runner_api/pyproject.toml ./pyproject.toml
+
+# Shared code
+COPY common/ ./common/
 
 # Install the application using uv
 RUN uv sync

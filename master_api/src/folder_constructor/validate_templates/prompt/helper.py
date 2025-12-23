@@ -93,10 +93,10 @@ def _get_async_client() -> openai.AsyncOpenAI:
         return openai.AsyncOpenAI(base_url=base_url, api_key="None")
 
     raise RuntimeError(
-        "No LLM API configured. Either:\n"
-        "1. Set PROMPT_BASE_URL (and optional PROMPT_API_KEY), or\n"
-        "2. Set PROMPT_OPENROUTER_API_KEY, or\n"
-        "3. Configure local vLLM at vllm/classifier/vllm_config.yaml"
+        "No LLM API configured.\n"
+        "In this repo, Runner API is expected to provide PROMPT_BASE_URL / PROMPT_API_KEY "
+        "based on repo-level llm_models.yml.\n"
+        "Also supported: local vLLM via vllm/classifier/vllm_config.yaml."
     )
 
 
@@ -163,13 +163,20 @@ class ClientWrapper:
         await self.client.close()
 
 
-# --- Agent base and implementations (inline) ---
+# --- Agent base and implementation (inline) ---
 class OutputDict(TypedDict):
     predictions: List[Any]
     call_logs: List[List[CallLog]]
 
 
-class BasePromptAgent:
+# Configuration from template placeholders
+EXTRACTION_PATTERN = r"${regexp_pattern}"
+FAILURE_VALUE = ${failure_value}
+
+
+class PromptAgent:
+    """Unified prompt agent with configurable extraction pattern."""
+
     def __init__(self, client: ClientWrapper, prompt_template: str):
         self.client = client
         self.prompt_template = prompt_template
@@ -183,59 +190,19 @@ class BasePromptAgent:
         return self._extract_answer(response)
 
     def _extract_answer(self, response: str) -> Any:
-        raise NotImplementedError
+        """Extract answer from LLM response using configured pattern."""
+        if not EXTRACTION_PATTERN:
+            # No pattern - return full response
+            return response.strip()
 
-
-class MultiChoiceAgent(BasePromptAgent):
-    def _extract_answer(self, response: str) -> str:
-        match = re.search(r"Answer:\s*([A-Za-z])", response, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
-        return -1.0
-
-
-class ClassificationAgent(BasePromptAgent):
-    def _extract_answer(self, response: str) -> float:
-        match = re.search(r"Answer:\s*([0-9]*\\.?[0-9]+)", response, re.IGNORECASE)
-        if match:
-            try:
-                probability = float(match.group(1))
-                return max(0.0, min(1.0, probability))
-            except ValueError:
-                return -1.0
-        return -1.0
-
-
-class NumericAnswerAgent(BasePromptAgent):
-    def _extract_answer(self, response: str) -> float:
-        match = re.search(r"Answer:\s*([+-]?[0-9]*\\.?[0-9]+)", response, re.IGNORECASE)
-        if match:
-            try:
-                return float(match.group(1))
-            except ValueError:
-                return -1.0
-        return -1.0
-
-
-class BoxedAnswerAgent(BasePromptAgent):
-    def _extract_answer(self, response: str) -> str:
-        match = re.search(r"\\\\boxed\\{([^}]+)\\}", response)
+        match = re.search(EXTRACTION_PATTERN, response, re.IGNORECASE | re.DOTALL)
         if match:
             return match.group(1).strip()
-        return -1.0
-
-
-class SummarizationAgent(BasePromptAgent):
-    def _extract_answer(self, response: str) -> str:
-        # Expecting "Summary: <text>" or return whole text if not found
-        match = re.search(r"Summary:\\s*(.+)", response, re.IGNORECASE | re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return response.strip()
+        return FAILURE_VALUE
 
 
 async def _process_sample(
-    agent_class: type[BasePromptAgent],
+    agent_class: type[PromptAgent],
     model_name: str,
     max_cost: float,
     index: int,
@@ -254,13 +221,13 @@ async def _process_sample(
             )
             if total_cost_util > 1.0:
                 raise ValueError(
-                    f"Cost budget exceeded: {total_cost_util:.2%} of max cost (${max_cost}) used"
+                    f"Cost budget exceeded: {total_cost_util:.2%} of max cost (${{max_cost}}) used"
                 )
         return index, prediction, call_logs
 
 
 async def _run_agent_async(
-    agent_class: type[BasePromptAgent],
+    agent_class: type[PromptAgent],
     context: dict,
     dataset_key: str = "train_dataset",
 ) -> OutputDict:
@@ -295,8 +262,7 @@ def run_agent(prompt_template: str, context: dict):
     required_placeholders = {${required_fields_set}}
     validator = create_validator(required_placeholders, available_placeholders)
     validator(prompt_template)
-    agent_class = ${agent_class}
-    agent_cls_partial = partial(agent_class, prompt_template=prompt_template)
+    agent_cls_partial = partial(PromptAgent, prompt_template=prompt_template)
     train_output = asyncio.run(_run_agent_async(agent_cls_partial, context, "train_dataset"), debug=True)
     val_output = asyncio.run(_run_agent_async(agent_cls_partial, context, "val_dataset"), debug=True)
     return {"train": train_output, "val": val_output}

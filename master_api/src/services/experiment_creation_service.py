@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from ..config import load_config
+from ..folder_constructor.prompt_experiment_builder import build_prompt_experiment
 from ..folder_constructor.uuid_experiment_builder import build_uuid_experiment
 from ..services.database_service import DatabaseService
 from ..services.storage_service import StorageService
@@ -37,9 +39,6 @@ class ExperimentCreationService:
         to the storage base prefix so the runner can download the whole folder.
         """
         try:
-            import shutil
-            from ..folder_constructor.prompt_experiment_builder import build_prompt_experiment
-
             logger.info(f"Creating prompt experiment files for {experiment_id}")
 
             # Create a temporary working directory
@@ -121,102 +120,6 @@ class ExperimentCreationService:
                     shutil.rmtree(temp_work_dir, ignore_errors=True)  # type: ignore
             except Exception:
                 pass
-
-    async def create_prompt_experiment_with_wizard(
-        self,
-        experiment_id: str,
-        *,
-        task_name: str,
-        task_type: str,
-        task_description: str,
-        local_dataset_path: str,
-        target_field: str,
-        prompt_repo_base: Optional[str] = None,
-        templates_dir: Optional[str] = None,
-    ) -> Optional[str]:
-        """
-        Use internal builder to scaffold a prompt problem and upload it.
-        Returns storage base prefix on success.
-        """
-        try:
-            # Use internal builder instead of external wizard
-            logger.warning("create_prompt_experiment_with_wizard is deprecated - use create_prompt_experiment_files instead")
-            return None
-            if not os.path.exists(local_dataset_path):
-                logger.error(f"Local dataset not found: {local_dataset_path}")
-                return None
-
-            # Output root for wizard
-            output_root = tempfile.mkdtemp(prefix=f"wizard_out_{experiment_id[:8]}_")
-
-            cmd = [
-                sys.executable,
-                "-m",
-                "tools.prompt_wizard",
-                task_name,
-                "--task-type",
-                task_type,
-                "--task-description",
-                task_description,
-                "--dataset-path",
-                local_dataset_path,
-                "--target-field",
-                target_field,
-                "--template-dir",
-                tmpl_dir,
-                "--output-dir",
-                output_root,
-                "--overwrite",
-            ]
-
-            logger.info(f"Running prompt wizard for {task_name} in {repo_base}")
-            proc = await _asyncio.create_subprocess_exec(
-                *cmd, cwd=repo_base, stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                logger.error(f"Wizard failed for {task_name}: {stderr.decode('utf-8', errors='ignore')}")
-                return None
-            if stdout:
-                logger.debug(stdout.decode("utf-8", errors="ignore"))
-
-            exp_dir = os.path.join(output_root, task_name)
-            if not os.path.isdir(exp_dir):
-                logger.error(f"Wizard output directory not found: {exp_dir}")
-                return None
-
-            # Upload folder to storage
-            storage_base_path = await self.storage_service.upload_experiment_files(exp_dir, experiment_id)
-            if not storage_base_path:
-                logger.error("Failed to upload wizard-generated prompt experiment files to storage")
-                try:
-                    await self.db_service.update_experiment_status(
-                        experiment_id, "failed", error_message="Failed to upload prompt wizard files"
-                    )
-                except Exception:
-                    pass
-                return None
-
-            # Update DB
-            experiment = await self.db_service.get_experiment(experiment_id)
-            if experiment:
-                updated_config = (experiment.config or {}).copy()
-                updated_config["experiment_files_path"] = storage_base_path
-                await self.db_service.update_experiment(
-                    experiment_id,
-                    config=updated_config,
-                    data_path=storage_base_path,
-                    status="prepared",
-                )
-
-            return storage_base_path
-        except Exception as e:
-            logger.error(f"Error running prompt wizard for {experiment_id}: {e}")
-            try:
-                await self.db_service.update_experiment_status(experiment_id, "failed", error_message=str(e))
-            except Exception:
-                pass
-            return None
 
     async def create_experiment_files(
         self, experiment_id: str, experiment_config: Dict[str, Any], data_path: Optional[str] = None

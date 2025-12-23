@@ -244,11 +244,38 @@ async def startup_event():
                                 payload = json.loads(data.decode("utf-8"))
                             except Exception:
                                 continue
+
                             best_fitness = payload.get("best_fitness")
                             best_program_code = payload.get("best_program")
-                            update_kwargs = {}
+
+                            # Derive progress percentage from reported iterations vs configured max_iterations
+                            total_iterations = payload.get("total_iterations")
+                            exp_config = getattr(exp, "config", {}) or {}
+                            max_iterations = exp_config.get("max_iterations") if isinstance(exp_config, dict) else None
+
+                            progress_pct = None
+                            if (
+                                isinstance(total_iterations, (int, float))
+                                and isinstance(max_iterations, (int, float))
+                                and max_iterations > 0
+                            ):
+                                # Clamp to [0, 100]
+                                progress_pct = max(
+                                    0.0, min(100.0, float(total_iterations) / float(max_iterations) * 100.0)
+                                )
+
+                            # Merge metrics instead of overwriting so we can keep multiple values
+                            existing_metrics = getattr(exp, "metrics", {}) or {}
+                            current_metrics = dict(existing_metrics) if isinstance(existing_metrics, dict) else {}
+
                             if best_fitness is not None:
-                                update_kwargs["metrics"] = {"fitness": float(best_fitness)}
+                                current_metrics["fitness"] = float(best_fitness)
+                            if progress_pct is not None:
+                                current_metrics["progress"] = float(progress_pct)
+
+                            update_kwargs = {}
+                            if current_metrics:
+                                update_kwargs["metrics"] = current_metrics
                             # Persist best program and validation artifacts into S3 and DB for quick download
                             try:
                                 # Keys

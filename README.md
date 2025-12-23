@@ -47,6 +47,10 @@ GigaEvo Platform consists of three main components:
 - Python 3.12+ (for local development)
 - uv (recommended) or pip
 
+### LLM configuration
+
+GigaEvo platform reads all LLM settings from a single repo-level file: `llm_models.yml`. Create `llm_models.yml` from the `llm_models.yml.example` template and fill in your credentials.
+
 ### Using the Deployment System
 
 GigaEvo Platform uses the **deploy.sh** script with Docker Compose for service orchestration:

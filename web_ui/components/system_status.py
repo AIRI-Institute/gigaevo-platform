@@ -1,6 +1,7 @@
 """System Status tab component."""
 
 import gradio as gr
+from config.settings import DEFAULT_LIMITS
 from loguru import logger
 
 from .base import BaseComponent
@@ -22,6 +23,10 @@ class SystemStatusComponent(BaseComponent):
 
             # Wire up event handlers
             refresh_status_btn.click(self._get_status_blocks, outputs=status_blocks_display)
+
+            # Auto-refresh system status periodically
+            timer = gr.Timer(DEFAULT_LIMITS["refresh_interval"])
+            timer.tick(self._get_status_blocks, outputs=status_blocks_display)
 
             # Load initial status
             status_blocks_display.value = self._get_status_blocks()

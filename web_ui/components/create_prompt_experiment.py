@@ -3,15 +3,14 @@
 import os
 import re
 import tempfile
-import requests
 
 import gradio as gr
+import requests
 from config.settings import (
-    AVAILABLE_LLM_MODELS,
-    VALIDATION_RULES,
+    INTERNAL_S3_API_URL,
     S3_API_URL,
     STORAGE_BUCKET_NAME,
-    INTERNAL_S3_API_URL,
+    VALIDATION_RULES,
 )
 from loguru import logger
 from utils.file_handlers import (
@@ -24,6 +23,13 @@ from utils.validators import (
     validate_experiment_name,
     validate_file_upload,
     validate_max_iterations,
+    validate_regexp_pattern,
+)
+
+from common.llm_registry import (
+    get_default_llm_model_id,
+    get_default_prompt_llm_model_id,
+    get_llm_model_choices,
 )
 
 from .base import BaseComponent
@@ -95,10 +101,16 @@ class CreatePromptExperimentComponent(BaseComponent):
                         info="Maximum number of evolution iterations",
                     )
                     llm_model_input = gr.Dropdown(
-                        choices=AVAILABLE_LLM_MODELS,
-                        value=AVAILABLE_LLM_MODELS[0],
-                        label="LLM Model",
-                        info="LLM model to use for prompt evolution",
+                        choices=get_llm_model_choices(),  # (label, id)
+                        value=get_default_llm_model_id(),  # id
+                        label="Evolution Model",
+                        info="Model used by the evolution engine",
+                    )
+                    prompt_llm_model_input = gr.Dropdown(
+                        choices=get_llm_model_choices(),  # (label, id)
+                        value=get_default_prompt_llm_model_id(),  # id
+                        label="Prompt Template Model",
+                        info="Model used by the prompt template evaluator",
                     )
 
             with gr.Row():
@@ -165,19 +177,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                         "Generate Baseline Prompt", size="sm", variant="secondary", visible=False
                     )
 
-                    # TEMPORARY: Simplified Task Type section
-                    # FUTURE: Uncomment the complex Validation Criteria section below when needed
-                    gr.Markdown("#### 🎯 Task Type")
-                    task_type_input = gr.Dropdown(
-                        choices=["classification", "multi_choice", "math", "summarization"],
-                        label="Task Type",
-                        info="Select the type of task for this experiment",
-                        interactive=True,
-                        value="classification",
-                    )
-
-                    # FUTURE: Uncomment this complex Validation Criteria section when needed
-                    """
                     # Validation Criteria section
                     gr.Markdown("#### 🔧 Validation Criteria")
                     with gr.Group():
@@ -191,7 +190,7 @@ class CreatePromptExperimentComponent(BaseComponent):
                         # Binary validation options
                         with gr.Group() as binary_validation_group:
                             binary_validation_method_input = gr.Dropdown(
-                                choices=["equality", "occurrence of a substring", "RegExp"],
+                                choices=["equality", "substring", "regexp"],
                                 label="Binary Validation Method",
                                 info="Method for binary validation",
                                 visible=True,
@@ -199,10 +198,10 @@ class CreatePromptExperimentComponent(BaseComponent):
                             )
                             regexp_pattern_input = gr.Textbox(
                                 label="RegExp Pattern",
-                                placeholder="Enter regular expression pattern to extract target substring...",
+                                placeholder=r"Example: Answer:\s*(.+?)$  - extracts text after 'Answer:'",
                                 visible=False,
                                 lines=2,
-                                info="Regular expression to match the target substring",
+                                info="Regular expression with capture group to extract and compare with ground truth",
                             )
 
                         # Continuous validation options
@@ -212,17 +211,14 @@ class CreatePromptExperimentComponent(BaseComponent):
                                     "ROUGE-1",
                                     "ROUGE-2",
                                     "ROUGE-L",
-                                    "ROUGE-Lsum",
-                                    "METEOR",
                                     "BERTScore",
-                                    "AlignScore",
+                                    "BLEU",
                                 ],
                                 label="Continuous Validation Metric",
                                 info="Metric for continuous validation",
                                 visible=False,
                                 interactive=True,
                             )
-                    """
 
             # Action buttons
             with gr.Row():
@@ -253,6 +249,7 @@ class CreatePromptExperimentComponent(BaseComponent):
                 description_input,
                 max_iterations_input,
                 llm_model_input,
+                prompt_llm_model_input,
                 base_prompt_input,
                 column_buttons_row,
                 no_columns_msg,
@@ -268,14 +265,12 @@ class CreatePromptExperimentComponent(BaseComponent):
                 current_columns_state,
                 clicked_columns_state,
                 button_offset_state,
-                task_type_input,
-                # FUTURE: Uncomment these validation criteria parameters when needed
-                # validation_type_input,
-                # binary_validation_group,
-                # binary_validation_method_input,
-                # regexp_pattern_input,
-                # continuous_validation_group,
-                # continuous_metric_input,
+                validation_type_input,
+                binary_validation_group,
+                binary_validation_method_input,
+                regexp_pattern_input,
+                continuous_validation_group,
+                continuous_metric_input,
                 create_btn,
                 clean_btn,
                 create_output,
@@ -300,6 +295,7 @@ class CreatePromptExperimentComponent(BaseComponent):
             description_input,
             max_iterations_input,
             llm_model_input,
+            prompt_llm_model_input,
             base_prompt_input,
             column_buttons_row,
             no_columns_msg,
@@ -315,14 +311,12 @@ class CreatePromptExperimentComponent(BaseComponent):
             current_columns_state,
             clicked_columns_state,
             button_offset_state,
-            task_type_input,
-            # FUTURE: Uncomment these validation criteria parameters when needed
-            # validation_type_input,
-            # binary_validation_group,
-            # binary_validation_method_input,
-            # regexp_pattern_input,
-            # continuous_validation_group,
-            # continuous_metric_input,
+            validation_type_input,
+            binary_validation_group,
+            binary_validation_method_input,
+            regexp_pattern_input,
+            continuous_validation_group,
+            continuous_metric_input,
             create_btn,
             clean_btn,
             create_output,
@@ -454,8 +448,6 @@ class CreatePromptExperimentComponent(BaseComponent):
             ],
         )
 
-        # FUTURE: Uncomment these validation criteria event handlers when needed
-        """
         # Handle validation type change for cascading behavior
         def _handle_validation_type_change(validation_type):
             # Handle validation type selection change.
@@ -465,12 +457,12 @@ class CreatePromptExperimentComponent(BaseComponent):
                     gr.update(value="equality", visible=True),  # binary_validation_method_input
                     gr.update(visible=False),  # regexp_pattern_input
                     gr.update(visible=False),  # continuous_validation_group
-                    gr.update(visible=True),  # continuous_metric_input
+                    gr.update(value=None, visible=False),  # continuous_metric_input
                 )
             elif validation_type == "Continuous (0..1)":
                 return (
                     gr.update(visible=False),  # binary_validation_group
-                    gr.update(visible=True),  # binary_validation_method_input
+                    gr.update(value=None, visible=False),  # binary_validation_method_input
                     gr.update(visible=False),  # regexp_pattern_input
                     gr.update(visible=True),  # continuous_validation_group
                     gr.update(value="ROUGE-1", visible=True),  # continuous_metric_input
@@ -479,10 +471,10 @@ class CreatePromptExperimentComponent(BaseComponent):
                 # No selection made
                 return (
                     gr.update(visible=False),  # binary_validation_group
-                    gr.update(visible=True),  # binary_validation_method_input
+                    gr.update(value=None, visible=False),  # binary_validation_method_input
                     gr.update(visible=False),  # regexp_pattern_input
                     gr.update(visible=False),  # continuous_validation_group
-                    gr.update(visible=True),  # continuous_metric_input
+                    gr.update(value=None, visible=False),  # continuous_metric_input
                 )
 
         validation_type_input.change(
@@ -497,20 +489,18 @@ class CreatePromptExperimentComponent(BaseComponent):
             ],
         )
 
-        # Handle binary validation method change (show/hide RegExp input)
+        # Handle binary validation method change
         def _handle_binary_method_change(binary_method):
-            # Handle binary validation method selection change.
-            if binary_method == "RegExp":
-                return gr.update(visible=True, interactive=True)
+            if binary_method == "regexp":
+                return gr.update(visible=True)  # Show regexp_pattern_input
             else:
-                return gr.update(visible=False)
+                return gr.update(visible=False)  # Hide regexp_pattern_input
 
         binary_validation_method_input.change(
             _handle_binary_method_change,
             inputs=[binary_validation_method_input],
             outputs=[regexp_pattern_input],
         )
-        """
 
         # Set up click handlers for column buttons with proper closure and rotation
         for i, btn in enumerate(column_buttons):
@@ -560,7 +550,7 @@ class CreatePromptExperimentComponent(BaseComponent):
             )
 
         # Generate baseline prompt handler
-        def _generate_baseline_prompt(all_columns, target_column, task_type):
+        def _generate_baseline_prompt(all_columns, target_column):
             """Generate a baseline prompt using available columns."""
             if not all_columns or not target_column:
                 return gr.update(value="")
@@ -574,12 +564,6 @@ class CreatePromptExperimentComponent(BaseComponent):
             # Create a baseline prompt template
             key_features = feature_columns
             features_text = "\n".join([f"- {{{col}}}" for col in key_features])
-
-            # Add suffix based on task type
-            if task_type == "summarization":
-                suffix = "Summary:"
-            else:
-                suffix = "Answer: [expected answer]"
 
             baseline_prompt = f"""You are a machine learning assistant. Analyze the provided features to predict the target value.
 
@@ -595,13 +579,13 @@ Instructions:
 
 What is your prediction?
 
-{suffix}"""
+Answer: [expected answer]"""
 
             return gr.update(value=baseline_prompt)
 
         generate_baseline_btn.click(
             _generate_baseline_prompt,
-            inputs=[current_columns_state, target_field_input, task_type_input],
+            inputs=[current_columns_state, target_field_input],
             outputs=[base_prompt_input],
         )
 
@@ -614,7 +598,8 @@ What is your prediction?
                 gr.update(choices=[], value=None, visible=False),  # target_field_input
                 gr.update(value="No dataset selected"),  # dataset_info
                 gr.update(value=100),  # max_iterations_input
-                gr.update(value=AVAILABLE_LLM_MODELS[0]),  # llm_model_input
+                gr.update(value=get_default_llm_model_id()),  # llm_model_input
+                gr.update(value=get_default_prompt_llm_model_id()),  # prompt_llm_model_input
                 gr.update(value=""),  # base_prompt_input
                 gr.update(visible=False),  # column_buttons_row
                 gr.update(visible=True),  # no_columns_msg
@@ -623,14 +608,12 @@ What is your prediction?
                 [],  # current_columns_state
                 [],  # clicked_columns_state
                 0,  # button_offset_state
-                gr.update(value="classification"),  # task_type_input - TEMPORARY
-                # FUTURE: Uncomment these validation criteria outputs when needed
-                # gr.update(value=None),  # validation_type_input
-                # gr.update(visible=False),  # binary_validation_group
-                # gr.update(value=None),  # binary_validation_method_input
-                # gr.update(value=""),  # regexp_pattern_input
-                # gr.update(visible=False),  # continuous_validation_group
-                # gr.update(value=None),  # continuous_metric_input
+                gr.update(value=None),  # validation_type_input
+                gr.update(visible=False),  # binary_validation_group
+                gr.update(value=None),  # binary_validation_method_input
+                gr.update(value=""),  # regexp_pattern_input
+                gr.update(visible=False),  # continuous_validation_group
+                gr.update(value=None),  # continuous_metric_input
                 gr.update(value=""),  # create_output
             )
 
@@ -644,6 +627,7 @@ What is your prediction?
                 dataset_info,
                 max_iterations_input,
                 llm_model_input,
+                prompt_llm_model_input,
                 base_prompt_input,
                 column_buttons_row,
                 no_columns_msg,
@@ -652,14 +636,12 @@ What is your prediction?
                 current_columns_state,
                 clicked_columns_state,
                 button_offset_state,
-                task_type_input,
-                # FUTURE: Uncomment these validation criteria outputs when needed
-                # validation_type_input,
-                # binary_validation_group,
-                # binary_validation_method_input,
-                # regexp_pattern_input,
-                # continuous_validation_group,
-                # continuous_metric_input,
+                validation_type_input,
+                binary_validation_group,
+                binary_validation_method_input,
+                regexp_pattern_input,
+                continuous_validation_group,
+                continuous_metric_input,
                 create_output,
                 # leave presets controls intact
             ],
@@ -674,10 +656,14 @@ What is your prediction?
                 data_file_input,
                 max_iterations_input,
                 llm_model_input,
+                prompt_llm_model_input,
                 target_field_input,
                 base_prompt_input,
                 current_columns_state,
-                task_type_input,
+                validation_type_input,
+                binary_validation_method_input,
+                regexp_pattern_input,
+                continuous_metric_input,
                 preset_data_path_state,
             ],
             outputs=create_output,
@@ -734,9 +720,12 @@ What is your prediction?
             details = self.exp_manager.get_local_prompt_preset(task_name)
             if not details:
                 return (
-                    gr.update(), gr.update(), gr.update(), gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
+                    gr.update(),
                     "",  # preset_data_path_state
-                    gr.update(visible=True, value=f"Error: failed to load example '{task_name}'")
+                    gr.update(visible=True, value=f"Error: failed to load example '{task_name}'"),
                 )
 
             # Upload preset dataset to storage to get data_path
@@ -754,24 +743,22 @@ What is your prediction?
             if public_url:
                 ds_msg = f"📁 Preset dataset URL:\n{public_url}"
             else:
-                ds_msg = f"📁 Using preset dataset: {up.get('filename')}" if isinstance(up, dict) and "filename" in up else "📁 Preset dataset uploaded"
+                ds_msg = (
+                    f"📁 Using preset dataset: {up.get('filename')}"
+                    if isinstance(up, dict) and "filename" in up
+                    else "📁 Preset dataset uploaded"
+                )
 
             label = details.get("label") or task_name.replace("_", " ").title()
             desc = details.get("task_description") or ""
             base_prompt = details.get("baseline_prompt") or ""
             target_field = details.get("target_field") or ""
-            task_type_value = details.get("task_type") or "classification"
-            vd = details.get("validation_defaults") or {}
-            vt = vd.get("validation_type")
-            bm = vd.get("binary_method")
-            cm = vd.get("continuous_metric")
 
             return (
                 gr.update(value=label),
                 gr.update(value=desc),
                 gr.update(value=base_prompt),
                 gr.update(value=target_field, choices=[target_field]),
-                gr.update(value=task_type_value),
                 data_path,  # preset_data_path_state
                 gr.update(value=ds_msg),
             )
@@ -787,6 +774,7 @@ What is your prediction?
             # Bind task name via default argument to avoid missing-arg warnings
             def _make_prefill(task_name: str):
                 return lambda: _prefill_fixed_task(task_name)
+
             btn.click(
                 _make_prefill(task),
                 inputs=[],
@@ -795,11 +783,11 @@ What is your prediction?
                     description_input,
                     base_prompt_input,
                     target_field_input,
-                    task_type_input,
                     preset_data_path_state,
                     dataset_info,
                 ],
             )
+
     def _insert_column_template(self, current_prompt: str, column_name: str) -> str:
         """Insert column template into prompt.
 
@@ -869,10 +857,14 @@ What is your prediction?
         data_file,
         max_iterations: int,
         llm_model: str,
+        prompt_llm_model: str,
         target_field: str,
         base_prompt: str,
         available_columns: list,
-        task_type: str,
+        validation_type: str,
+        binary_validation_method: str,
+        regexp_pattern: str,
+        continuous_metric: str,
         preset_data_path: str,
     ) -> str:
         """Create a new prompt-based experiment using the /prompts endpoint.
@@ -886,12 +878,10 @@ What is your prediction?
             target_field: Target column
             base_prompt: Base prompt with templates
             available_columns: List of available columns
-            task_type: Task type (TEMPORARY: classification, multi_choice, math, summarization)
-            # FUTURE: Uncomment these validation criteria parameters when needed
-            # validation_type: Validation type (Binary/Continuous)
-            # binary_validation_method: Binary validation method
-            # regexp_pattern: RegExp pattern for binary validation
-            # continuous_metric: Continuous validation metric
+            validation_type: Validation type (Binary/Continuous)
+            binary_validation_method: Binary validation method
+            regexp_pattern: RegExp pattern for binary validation
+            continuous_metric: Continuous validation metric
 
         Returns:
             Status message
@@ -949,6 +939,12 @@ What is your prediction?
         if not target_field:
             return "Error: Please select a target column"
 
+        # Validate regexp pattern when using regexp binary method
+        if binary_validation_method == "regexp":
+            is_valid, error = validate_regexp_pattern(regexp_pattern)
+            if not is_valid:
+                return f"Error: {error}"
+
         try:
             # Handle data file upload
             data_path = preset_data_path or ""
@@ -969,21 +965,6 @@ What is your prediction?
                 else:
                     return "Error: Uploaded file is not accessible"
 
-            # TEMPORARY: Create prompt experiment payload with simplified task_type
-            # FUTURE: Replace with the complex validation_criteria approach when needed
-            prompt_experiment_data = {
-                "name": name,
-                "description": description,
-                "data_path": data_path,
-                "target_column": target_field,
-                "base_prompt": base_prompt,
-                "task_type": task_type,  # TEMPORARY: Simplified task type
-                "llm_model": llm_model,
-                "max_iterations": max_iterations,
-            }
-
-            # FUTURE: Uncomment this complex validation criteria approach when needed
-            """
             # Create prompt experiment payload matching PromptExperimentCreate schema
             validation_criteria = {
                 "validation_type": validation_type,
@@ -1000,9 +981,9 @@ What is your prediction?
                 "base_prompt": base_prompt,
                 "validation_criteria": validation_criteria,
                 "llm_model": llm_model,
+                "prompt_llm_model": prompt_llm_model,
                 "max_iterations": max_iterations,
             }
-            """
 
             # Create prompt experiment using new endpoint
             result = self.exp_manager.create_prompt_experiment(prompt_experiment_data)
@@ -1010,7 +991,7 @@ What is your prediction?
             if "error" in result:
                 return f"Error: {result['error']}"
 
-            return f"✅ Prompt experiment '{name}' created successfully with ID: {result['id']}\nFile uploaded to storage: {data_path}\nTarget: {target_field}\nTask type: {task_type}\nTemplate placeholders: {len(re.findall(r'\{([^}]+)\}', base_prompt))}"
+            return f"✅ Prompt experiment '{name}' created successfully with ID: {result['id']}\nFile uploaded to storage: {data_path}\nTarget: {target_field}\nValidation type: {validation_type}\nTemplate placeholders: {len(re.findall(r'\{([^}]+)\}', base_prompt))}"
 
         except Exception as e:
             logger.error(f"Error creating prompt experiment: {e}")

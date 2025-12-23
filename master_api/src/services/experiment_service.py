@@ -318,6 +318,8 @@ class ExperimentService:
                 "target_column": experiment_model.config.get("parameters", {}).get("target_column"),
                 "n_classes": experiment_model.config.get("parameters", {}).get("n_classes"),
                 "n_clusters": experiment_model.config.get("parameters", {}).get("n_clusters"),
+                "llm_model": experiment_model.config.get("llm_model", "local-inference"),
+                "prompt_llm_model": experiment_model.config.get("prompt_llm_model"),
                 "max_iterations": experiment_model.config.get("max_iterations", 100),
                 "timeout_seconds": experiment_model.config.get("timeout_seconds", 3600),
             }

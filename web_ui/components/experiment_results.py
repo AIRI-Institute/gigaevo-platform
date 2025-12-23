@@ -1,6 +1,7 @@
 """Experiment Results tab component."""
 
 import gradio as gr
+from config.settings import DEFAULT_LIMITS
 from loguru import logger
 from utils.formatters import build_experiment_selector_choices
 
@@ -42,12 +43,12 @@ class ExperimentResultsComponent(BaseComponent):
                 value = current_value if current_value in choices else (choices[0] if choices else None)
                 return gr.Dropdown(choices=choices, value=value, interactive=True)
 
-            # Auto-refresh selector every 10 seconds
-            res_selector_timer = gr.Timer(10)
+            # Auto-refresh selector periodically
+            res_selector_timer = gr.Timer(DEFAULT_LIMITS["refresh_interval"])
             res_selector_timer.tick(refresh_selector, inputs=res_selector, outputs=res_selector)
 
-            # Auto-refresh code every 10 seconds
-            code_timer = gr.Timer(10)
+            # Auto-refresh code periodically
+            code_timer = gr.Timer(DEFAULT_LIMITS["refresh_interval"])
             code_timer.tick(self._fetch_best_program_code, inputs=res_selector, outputs=best_program_code)
 
             # Set up event handlers

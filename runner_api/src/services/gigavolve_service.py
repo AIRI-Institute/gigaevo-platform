@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from common.llm_registry import get_default_llm_model_id, get_default_prompt_llm_model_id, get_llm_runtime_required
+
 from ..config import load_config
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,58 @@ class GigaEvolveService:
     def __init__(self):
         self.config = load_config().gigavolve
         self._ensure_repos_directory()
+
+    def _resolve_python_path(self, clone_path: Path) -> str:
+        """Prefer repo-local venv python if present; otherwise fall back to configured python_path."""
+        venv_python = clone_path / ".venv" / "bin" / "python"
+        return str(venv_python) if venv_python.exists() else self.config.python_path
+
+    @staticmethod
+    def _normalize_problem_name(experiment_id: str) -> str:
+        """Normalize experiment id into problem.name (used for Redis keys)."""
+        return experiment_id.replace("exp_", "") if experiment_id.startswith("exp_") else experiment_id
+
+    @staticmethod
+    def _env_with_problem_dir(problem_dir: Path, *, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """
+        Return env with PROBLEM_DIR set and PYTHONPATH prepended with problem dir (for helper imports).
+        """
+        env: Dict[str, str] = dict(base_env) if base_env is not None else dict(os.environ)
+        problem_dir_str = str(problem_dir.resolve())
+
+        # Provide problem directory for exec runner to resolve __file__ when executing user code,
+        # and for tools that need to import helper modules from the problem directory.
+        env["PROBLEM_DIR"] = problem_dir_str
+
+        # Only prepend PYTHONPATH if the directory exists (preserve prior behavior).
+        if problem_dir.exists():
+            existing_pythonpath = env.get("PYTHONPATH", "")
+            if existing_pythonpath:
+                env["PYTHONPATH"] = f"{problem_dir_str}{os.pathsep}{existing_pythonpath}"
+            else:
+                env["PYTHONPATH"] = problem_dir_str
+        return env
+
+    def _redis_host_port_db(self) -> tuple[str, int, int]:
+        """Resolve redis host/port/db from config (supports redis_url or legacy config)."""
+        cfg = load_config()
+        candidate_url = (cfg.gigavolve.redis_url or cfg.redis.url or "").strip()
+        return self._parse_redis_url(candidate_url)
+
+    def _ensure_llm_config_present(self, clone_path: Path, *, strict: bool, context: str) -> None:
+        """Ensure Hydra LLM config file exists for the repo; optionally raise on failure."""
+        try:
+            self._ensure_llm_config_file(clone_path)
+            cfg_path = clone_path / "config" / "llm" / "custom.yaml"
+            if cfg_path.exists():
+                logger.info(f"✓ LLM config ensured ({context}) at {cfg_path}")
+            else:
+                raise RuntimeError(f"LLM config file missing at {cfg_path}")
+        except Exception as e:
+            if strict:
+                logger.error(f"✗ Failed to ensure LLM config ({context}): {e}", exc_info=True)
+                raise
+            logger.warning(f"Failed to ensure LLM config ({context}): {e}")
 
     @staticmethod
     def _sanitize_url(url: str) -> str:
@@ -94,18 +148,7 @@ class GigaEvolveService:
                             f"Using local development repository at {clone_path} (not a git repo, but has run.py)"
                         )
                         # CRITICAL: Ensure LLM config exists for local repo
-                        # This creates config/llm/custom.yaml that matches the working format
-                        try:
-                            self._ensure_llm_config_file(clone_path)
-                            cfg_path = clone_path / "config" / "llm" / "custom.yaml"
-                            if cfg_path.exists():
-                                logger.info(f"✓ LLM config ensured for local repo at {cfg_path}")
-                            else:
-                                logger.error(f"✗ LLM config file was not created at {cfg_path}")
-                                raise RuntimeError(f"LLM config file missing at {cfg_path}")
-                        except Exception as cfg_err:
-                            logger.error(f"✗ Failed to ensure LLM config file in local repo: {cfg_err}", exc_info=True)
-                            raise RuntimeError(f"Cannot use local repo without LLM config: {cfg_err}") from cfg_err
+                        self._ensure_llm_config_present(clone_path, strict=True, context="local repo")
                         return True
                     else:
                         # It's a git repo, continue with normal flow
@@ -134,10 +177,7 @@ class GigaEvolveService:
                         except Exception as dep_err:
                             logger.warning(f"Dependency installation after pull/checkout failed: {dep_err}")
                         # Ensure LLM config exists even when repo already present
-                        try:
-                            self._ensure_llm_config_file(clone_path)
-                        except Exception as cfg_err:
-                            logger.warning(f"Failed to ensure LLM config file after update: {cfg_err}")
+                        self._ensure_llm_config_present(clone_path, strict=False, context="after update")
                         return True
                     except subprocess.CalledProcessError as e:
                         logger.warning(f"Failed to update existing repo, will reclone: {self._redact(str(e))}")
@@ -189,10 +229,7 @@ class GigaEvolveService:
                 logger.warning(f"Dependency installation after clone failed: {dep_err}")
 
             # Ensure local LLM config is present in the cloned repo
-            try:
-                self._ensure_llm_config_file(clone_path)
-            except Exception as cfg_err:
-                logger.warning(f"Failed to ensure LLM config file: {cfg_err}")
+            self._ensure_llm_config_present(clone_path, strict=False, context="after clone")
 
             return True
 
@@ -275,6 +312,12 @@ class GigaEvolveService:
                 # Install project (non-editable to minimize file churn)
                 subprocess.run([str(venv_pip), "install", "."], cwd=str(clone_path), check=True, text=True)
                 subprocess.run([str(venv_pip), "install", "scikit-learn"], cwd=str(clone_path), check=False, text=True)
+                subprocess.run(
+                    [str(venv_pip), "install", "evaluate", "rouge_score", "bert_score"],
+                    cwd=str(clone_path),
+                    check=False,
+                    text=True,
+                )
                 logger.info("Installed repo dependencies into dedicated venv (pyproject)")
             elif requirements.exists():
                 subprocess.run(
@@ -383,15 +426,17 @@ class GigaEvolveService:
         """
         Create/update local LLM Hydra config expected by GigaEvo Core:
           <repo>/config/llm/custom.yaml
-        The config references runtime environment variables, so we do not bake secrets here.
+        The repo-level llm_models.yml is the single source of truth; we bake runtime values
+        into the generated Hydra config and do not rely on env/.env for LLM settings.
         """
         try:
             llm_dir = clone_path / "config" / "llm"
             llm_dir.mkdir(parents=True, exist_ok=True)
             cfg_path = llm_dir / "custom.yaml"
 
-            # Create config content matching the working format
-            # This config will be used when running with llm=custom parameter
+            # NOTE: selected model id is provided per experiment in config.json.
+            # Here we write a template config; actual values are written right before run.
+            # This method remains to ensure the file exists with a valid structure.
             content = (
                 "# @package _global_\n\n"
                 "llm:\n"
@@ -399,14 +444,14 @@ class GigaEvolveService:
                 "  _convert_: all\n"
                 "  models:\n"
                 "    - _target_: langchain_openai.ChatOpenAI\n"
-                "      model: ${oc.env:LLM__MODEL,gigachat-max-2}\n"
-                "      api_key: ${oc.env:LLM__API_KEY}\n"
-                "      temperature: ${oc.env:LLM__TEMPERATURE,0.7}\n"
-                "      max_tokens: ${oc.env:LLM__MAX_TOKENS,2048}\n"
-                "      top_p: ${oc.env:LLM__TOP_P,1.0}\n"
-                "      base_url: ${oc.env:LLM__BASE_URL}\n"
+                "      model: local-inference\n"
+                '      api_key: ""\n'
+                "      temperature: 0.7\n"
+                "      max_tokens: 2048\n"
+                "      top_p: 1.0\n"
+                '      base_url: ""\n'
                 "      request_timeout: 30\n"
-                "      max_retries: ${oc.env:LLM__MAX_RETRIES,3}\n"
+                "      max_retries: 3\n"
                 "      timeout: 30\n"
                 "  probabilities: [1.0]\n"
             )
@@ -427,6 +472,53 @@ class GigaEvolveService:
                 f"Failed to create LLM config at {clone_path / 'config' / 'llm' / 'custom.yaml'}: {e}", exc_info=True
             )
             raise RuntimeError(f"Error writing LLM config: {e}") from e
+
+    def _write_llm_config_for_model(self, clone_path: Path, model_id: str) -> None:
+        """Write Hydra LLM config with runtime values from llm_models.yml for the selected model."""
+        llm_dir = clone_path / "config" / "llm"
+        llm_dir.mkdir(parents=True, exist_ok=True)
+        cfg_path = llm_dir / "custom.yaml"
+
+        runtime = get_llm_runtime_required(
+            model_id,
+            required_keys={
+                "model",
+                "api_key",
+                "base_url",
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "max_retries",
+                "timeout",
+            },
+        )
+
+        payload = {
+            "llm": {
+                "_target_": "gigaevo.llm.models.MultiModelRouter",
+                "_convert_": "all",
+                "models": [
+                    {
+                        "_target_": "langchain_openai.ChatOpenAI",
+                        "model": runtime.get("model"),
+                        "api_key": runtime.get("api_key"),
+                        "temperature": float(runtime.get("temperature", 0.7)),
+                        "max_tokens": int(runtime.get("max_tokens", 2048)),
+                        "top_p": float(runtime.get("top_p", 1.0)),
+                        "base_url": runtime.get("base_url"),
+                        "request_timeout": int(runtime.get("request_timeout", 30)),
+                        "max_retries": int(runtime.get("max_retries", 3)),
+                        "timeout": int(runtime.get("timeout", 30)),
+                    }
+                ],
+                "probabilities": [1.0],
+            }
+        }
+
+        import yaml  # type: ignore
+
+        text = "# @package _global_\n\n" + yaml.safe_dump(payload, sort_keys=False)
+        cfg_path.write_text(text, encoding="utf-8")
 
     async def run_experiment(
         self,
@@ -449,12 +541,7 @@ class GigaEvolveService:
 
             problem_dir = clone_path / "problems" / str(experiment_id)
 
-            # If the repo-local venv exists, prefer its interpreter for this run
-            venv_python = clone_path / ".venv" / "bin" / "python"
-            if venv_python.exists():
-                python_path = str(venv_python)
-            else:
-                python_path = self.config.python_path
+            python_path = self._resolve_python_path(clone_path)
 
             logger.info(f"Using Python path: {python_path}")
 
@@ -478,13 +565,15 @@ class GigaEvolveService:
                     logger.info("Fixed import: gigaevo.runner.runner -> gigaevo.runner.dag_runner")
 
                 # Add SSL verification bypass logic (matching original run.py)
-                # This checks LLM_SSL_NO_VERIFY or PROMPT_SSL_NO_VERIFY environment variables
-                if "ssl._create_default_https_context" not in raw and "import ssl" not in raw:
+                # This checks LLM_SSL_NO_VERIFY or PROMPT_SSL_NO_VERIFY environment variables.
+                # NOTE: do not gate on "import ssl" presence; run.py may already import ssl.
+                if "ssl._create_default_https_context" not in raw:
                     # Find the main() function and add SSL bypass before load_dotenv()
                     ssl_bypass = (
                         "    # Optional: Dev-only SSL verification bypass for local/self-signed HTTPS endpoints.\n"
                         "    # Enable via env: LLM_SSL_NO_VERIFY=1 (or reuse PROMPT_SSL_NO_VERIFY=1)\n"
                         "    try:\n"
+                        "        import os\n"
                         '        _ssl_flag = (os.getenv("LLM_SSL_NO_VERIFY") or os.getenv("PROMPT_SSL_NO_VERIFY") or "0").strip().lower()\n'
                         '        if _ssl_flag in {"1", "true", "yes"}:\n'
                         "            ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[attr-defined]\n"
@@ -539,13 +628,13 @@ class GigaEvolveService:
             # CRITICAL: run.py uses problem.name for Redis keys, NOT the directory name.
             # For prompt experiments with IDs like "exp_<uuid>", we must pass the name WITHOUT
             # the "exp_" prefix so Redis keys match between storage and retrieval.
-            problem_name = experiment_id.replace("exp_", "") if experiment_id.startswith("exp_") else experiment_id
+            problem_name = self._normalize_problem_name(experiment_id)
 
             cmd = [
                 python_path,
                 str(script_to_run),
                 f"problem.name={problem_name}",  # Used by run.py for Redis keys
-                f"problem.dir={problem_dir}",    # Full path with exp_ prefix for file system
+                f"problem.dir={problem_dir}",  # Full path with exp_ prefix for file system
             ]
 
             # Add Redis configuration as Hydra overrides
@@ -589,23 +678,36 @@ class GigaEvolveService:
             # and environment variables, not via command line
 
             # Prepare environment (LLM base URL and API key)
-            env = os.environ.copy()
-            # Provide problem directory for exec runner to resolve __file__ when executing user code
-            env["PROBLEM_DIR"] = str(problem_dir)
-            # Ensure LLM environment variables are passed to subprocess
-            # Use environment variables if available, otherwise use config values
-            llm_base_url = os.getenv("LLM__BASE_URL") or cfg.llm.base_url or ""
-            llm_api_key = os.getenv("LLM__API_KEY") or cfg.llm.api_key or ""
-            llm_model = os.getenv("LLM__MODEL") or cfg.llm.model or ""
-            llm_max_tokens = os.getenv("LLM__MAX_TOKENS") or str(cfg.llm.max_tokens) if cfg.llm.max_tokens else "2048"
-            llm_request_timeout = os.getenv("LLM__REQUEST_TIMEOUT") or "120.0"
-            llm_max_retries = os.getenv("LLM__MAX_RETRIES") or "3"
-            llm_timeout = os.getenv("LLM__TIMEOUT") or "120.0"
+            env = self._env_with_problem_dir(problem_dir)
+            # Resolve selected model id from experiment config and load runtime values from llm_models.yml
+            selected_model_id = str(config.get("llm_model") or "").strip() or get_default_llm_model_id()
+            runtime = get_llm_runtime_required(
+                selected_model_id,
+                required_keys={"model", "api_key", "base_url"},
+            )
+            llm_base_url = str(runtime.get("base_url") or "")
+            llm_api_key = str(runtime.get("api_key") or "")
+            llm_model = str(runtime.get("model") or selected_model_id)
+            llm_max_tokens = str(runtime.get("max_tokens", 2048))
+            llm_request_timeout = str(runtime.get("request_timeout", 120.0))
+            llm_max_retries = str(runtime.get("max_retries", 3))
+            llm_timeout = str(runtime.get("timeout", 120.0))
+
+            # PROMPT_* variables use a separate, independently configurable model id.
+            prompt_model_id = str(config.get("prompt_llm_model") or "").strip() or get_default_prompt_llm_model_id()
+            prompt_runtime = get_llm_runtime_required(
+                prompt_model_id,
+                required_keys={"model", "api_key", "base_url"},
+            )
+            prompt_base_url = str(prompt_runtime.get("base_url") or "")
+            prompt_api_key = str(prompt_runtime.get("api_key") or "")
+            prompt_model = str(prompt_runtime.get("model") or prompt_model_id)
 
             # CRITICAL: Ensure LLM config file exists before running experiment
             # This creates/updates config/llm/custom.yaml that will be used via llm=custom
             try:
-                self._ensure_llm_config_file(clone_path)
+                # Write per-model Hydra config (single source of truth: llm_models.yml)
+                self._write_llm_config_for_model(clone_path, selected_model_id)
                 cfg_path = clone_path / "config" / "llm" / "custom.yaml"
                 if cfg_path.exists():
                     logger.info(f"✓ LLM config file exists at {cfg_path}")
@@ -616,7 +718,7 @@ class GigaEvolveService:
                 logger.error(f"✗ Failed to ensure LLM config file before experiment run: {cfg_err}", exc_info=True)
                 raise RuntimeError(f"Cannot proceed without LLM config: {cfg_err}") from cfg_err
 
-            # Set LLM__* variables for custom.yaml
+            # Set env vars for compatibility with existing codepaths/templates (values come from llm_models.yml)
             env["LLM__BASE_URL"] = llm_base_url
             env["LLM__API_KEY"] = llm_api_key
             env["LLM__MODEL"] = llm_model
@@ -624,35 +726,31 @@ class GigaEvolveService:
             env["LLM__REQUEST_TIMEOUT"] = llm_request_timeout
             env["LLM__MAX_RETRIES"] = llm_max_retries
             env["LLM__TIMEOUT"] = llm_timeout
-            # Set temperature and top_p if not already set
-            if "LLM__TEMPERATURE" not in env:
-                env["LLM__TEMPERATURE"] = str(cfg.llm.temperature) if cfg.llm.temperature else "0.7"
-            if "LLM__TOP_P" not in env:
-                env["LLM__TOP_P"] = "1.0"
+            env["LLM__TEMPERATURE"] = str(runtime.get("temperature", 0.7))
+            env["LLM__TOP_P"] = str(runtime.get("top_p", 1.0))
 
             # Also set OPENAI_API_KEY for compatibility (langchain_openai may use it)
             env["OPENAI_API_KEY"] = llm_api_key
             os.environ["OPENAI_LOG"] = "debug"
 
-            # Set SSL bypass if configured
-            if os.getenv("LLM_SSL_NO_VERIFY") or cfg.gigavolve.ssl_bypass_enabled:
+            # Set SSL bypass if configured in llm_models.yml (or via non-LLM gigavolve setting)
+            if (
+                bool(runtime.get("ssl_no_verify"))
+                or bool(prompt_runtime.get("ssl_no_verify"))
+                or cfg.gigavolve.ssl_bypass_enabled
+            ):
                 env["LLM_SSL_NO_VERIFY"] = "1"
+                env["PROMPT_SSL_NO_VERIFY"] = "1"
                 logger.info("SSL verification bypass enabled for LLM requests")
-            
-            # Pass PROMPT_* environment variables to subprocess (for prompt evolution experiments)
-            # These are used by context.py and helper.py in prompt templates
-            prompt_vars = [
-                "PROMPT_MODEL_NAME",
-                "PROMPT_MODEL",  # Alternative name for compatibility
-                "PROMPT_BASE_URL",
-                "PROMPT_API_KEY",
-                "PROMPT_OPENROUTER_API_KEY",
-                "PROMPT_SSL_NO_VERIFY",
-            ]
-            for var in prompt_vars:
-                value = os.getenv(var)
-                if value:
-                    env[var] = value
+
+            # Provide PROMPT_* env vars for prompt templates (values come from llm_models.yml)
+            env["PROMPT_MODEL_NAME"] = prompt_model
+            env["PROMPT_MODEL"] = prompt_model
+            env["PROMPT_BASE_URL"] = prompt_base_url
+            env["PROMPT_API_KEY"] = prompt_api_key
+            # Optional extras (kept for compatibility, but sourced from YAML if present)
+            if "openrouter_api_key" in prompt_runtime and str(prompt_runtime.get("openrouter_api_key") or "").strip():
+                env["PROMPT_OPENROUTER_API_KEY"] = str(prompt_runtime.get("openrouter_api_key"))
 
             logger.info(
                 f"Passing LLM env vars to subprocess: BASE_URL={env.get('LLM__BASE_URL', '')[:50]}..., MODEL={env.get('LLM__MODEL', '')}, TIMEOUT={llm_timeout}, MAX_RETRIES={llm_max_retries}"
@@ -733,10 +831,10 @@ class GigaEvolveService:
                     f.write(f"=== Experiment {experiment_id} Evolution Log ===\n")
                     f.write(f"Command: {' '.join(cmd)}\n")
                     f.write(f"Return code: {proc.returncode}\n")
-                    f.write(f"\n=== STDOUT ===\n")
+                    f.write("\n=== STDOUT ===\n")
                     f.write(stdout)
                     if stderr:
-                        f.write(f"\n=== STDERR ===\n")
+                        f.write("\n=== STDERR ===\n")
                         f.write(stderr)
                 logger.info(f"Saved full evolution log to {log_file}")
             except Exception as log_err:
@@ -834,19 +932,14 @@ class GigaEvolveService:
         """
         clone_path = Path(self.config.clone_path).resolve()
         try:
-            # Resolve python path (prefer repo .venv)
-            venv_python = clone_path / ".venv" / "bin" / "python"
-            python_path = str(venv_python) if venv_python.exists() else self.config.python_path
+            python_path = self._resolve_python_path(clone_path)
 
-            # Parse redis host/port/db from config
-            cfg = load_config()
-            candidate_url = (cfg.gigavolve.redis_url or cfg.redis.url or "").strip()
-            host, port, db = self._parse_redis_url(candidate_url)
+            host, port, db = self._redis_host_port_db()
 
             # Extract problem name from experiment_id (remove 'exp_' prefix if present)
             # CRITICAL: Must match the problem.name used by run.py (without exp_ prefix)
             # run.py stores data in Redis using problem.name, so we must use the same name here
-            problem_name = experiment_id.replace("exp_", "") if experiment_id.startswith("exp_") else experiment_id
+            problem_name = self._normalize_problem_name(experiment_id)
 
             # tools.comparison expects run spec <prefix>@<db>[:label]
             # The prefix must match what run.py used when storing data (problem.name without exp_)
@@ -856,11 +949,7 @@ class GigaEvolveService:
             out_dir = clone_path / output_subfolder
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # Determine problem directory path for PYTHONPATH
-            # This is needed so that when tools.comparison deserializes programs from Redis,
-            # Python can find modules like 'helper' that are imported by the program code.
             problem_dir = clone_path / "problems" / experiment_id
-            problem_dir_str = str(problem_dir.resolve()) if problem_dir.exists() else None
 
             # Build the command to run module tools.comparison
             cmd = [
@@ -879,17 +968,8 @@ class GigaEvolveService:
                 str(out_dir),
             ]
 
-            # Prepare environment with PYTHONPATH to include problem directory
-            # This allows Python to import 'helper' and other modules when deserializing programs
-            env = os.environ.copy()
-            if problem_dir_str:
-                existing_pythonpath = env.get("PYTHONPATH", "")
-                if existing_pythonpath:
-                    env["PYTHONPATH"] = f"{problem_dir_str}{os.pathsep}{existing_pythonpath}"
-                else:
-                    env["PYTHONPATH"] = problem_dir_str
-                env["PROBLEM_DIR"] = problem_dir_str
-                logger.info(f"Setting PYTHONPATH to include problem directory: {problem_dir_str}")
+            env = self._env_with_problem_dir(problem_dir)
+            logger.info(f"Setting PYTHONPATH to include problem directory: {env.get('PROBLEM_DIR')}")
 
             proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(clone_path), env=env)
             # Enforce a timeout using experiment_timeout to avoid hanging results collection
@@ -930,19 +1010,14 @@ class GigaEvolveService:
         """
         clone_path = Path(self.config.clone_path).resolve()
         try:
-            # Resolve python path (prefer repo .venv)
-            venv_python = clone_path / ".venv" / "bin" / "python"
-            python_path = str(venv_python) if venv_python.exists() else self.config.python_path
+            python_path = self._resolve_python_path(clone_path)
 
-            # Parse redis host/port/db from config
-            cfg = load_config()
-            candidate_url = (cfg.gigavolve.redis_url or cfg.redis.url or "").strip()
-            host, port, db = self._parse_redis_url(candidate_url)
+            host, port, db = self._redis_host_port_db()
 
             # Extract problem name from experiment_id (remove 'exp_' prefix if present)
             # CRITICAL: Must match the problem.name used by run.py (without exp_ prefix)
             # run.py stores data in Redis using problem.name, so we must use the same name here
-            problem_name = experiment_id.replace("exp_", "") if experiment_id.startswith("exp_") else experiment_id
+            problem_name = self._normalize_problem_name(experiment_id)
 
             # Ensure output folder exists
             out_dir = clone_path / output_subfolder
@@ -950,11 +1025,7 @@ class GigaEvolveService:
             out_csv = out_dir / "evolution_report.csv"
             out_json = out_dir / "evolution_report.json"
 
-            # Determine problem directory path for PYTHONPATH
-            # This is needed so that when tools.redis2pd deserializes programs from Redis,
-            # Python can find modules like 'helper' that are imported by the program code.
             problem_dir = clone_path / "problems" / experiment_id
-            problem_dir_str = str(problem_dir.resolve()) if problem_dir.exists() else None
 
             # Build the command to run module tools.redis2pd
             # The redis-prefix must match what run.py used when storing data (problem.name without exp_)
@@ -974,17 +1045,8 @@ class GigaEvolveService:
                 str(out_csv),
             ]
 
-            # Prepare environment with PYTHONPATH to include problem directory
-            # This allows Python to import 'helper' and other modules when deserializing programs
-            env = os.environ.copy()
-            if problem_dir_str:
-                existing_pythonpath = env.get("PYTHONPATH", "")
-                if existing_pythonpath:
-                    env["PYTHONPATH"] = f"{problem_dir_str}{os.pathsep}{existing_pythonpath}"
-                else:
-                    env["PYTHONPATH"] = problem_dir_str
-                env["PROBLEM_DIR"] = problem_dir_str
-                logger.info(f"Setting PYTHONPATH to include problem directory: {problem_dir_str}")
+            env = self._env_with_problem_dir(problem_dir)
+            logger.info(f"Setting PYTHONPATH to include problem directory: {env.get('PROBLEM_DIR')}")
 
             proc = await asyncio.create_subprocess_exec(*cmd, cwd=str(clone_path), env=env)
             # Enforce a timeout using experiment_timeout
@@ -1036,7 +1098,7 @@ class GigaEvolveService:
             else:
                 # If no state column, treat all rows as acceptable state
                 _state_ok = pd.Series([True] * len(df), index=df.index)
-            valid_completed = df[_state_ok & (df["metric_is_valid"] >= 1) & (df["is_complete"] == True)]
+            valid_completed = df[_state_ok & (df["metric_is_valid"] >= 1) & (df["is_complete"] == True)]  # noqa: E712
             # Determine fitness direction from workspace metrics.yml (higher_is_better)
             higher_is_better = True
             try:
@@ -1085,7 +1147,7 @@ class GigaEvolveService:
             total_programs = int(df["program_id"].nunique()) if "program_id" in df.columns else 0
             if "program_id" in df.columns and "is_complete" in df.columns:
                 try:
-                    _completed_mask = df["is_complete"] == True
+                    _completed_mask = df["is_complete"]
                     # Apply state filter
                     _completed_mask = _completed_mask & _state_ok
                     total_programs_complete = int(df[_completed_mask]["program_id"].nunique())

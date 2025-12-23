@@ -12,15 +12,6 @@ class RedisConfig(BaseModel):
     max_connections: int = 10
 
 
-class LLMConfig(BaseModel):
-    provider: str = "local-inference"
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    model: str = "gigachat-max-2"
-    max_tokens: int = 4000
-    temperature: float = 0.7
-
-
 class StorageConfig(BaseModel):
     endpoint_url: str = "http://localhost:9000"
     access_key: str = "minioadmin"
@@ -51,19 +42,19 @@ class GigaEvolveConfig(BaseModel):
     ssl_bypass_enabled: bool = False
     results_collection_interval: int = 10
 
+
 class ExtrasConfig(BaseModel):
     """Optional extra paths/hooks"""
+
     # Absolute path to prompt_layout.py to copy into cloned repo if missing
     prompt_layout_source: Optional[str] = None
+
 
 class Config(BaseSettings):
     model_config = SettingsConfigDict(env_nested_delimiter="__", extra="ignore")
 
     # Redis for task queue
     redis: RedisConfig = RedisConfig()
-
-    # LLM configuration
-    llm: LLMConfig = LLMConfig()
 
     # Storage configuration
     storage: StorageConfig = StorageConfig()

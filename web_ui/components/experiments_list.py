@@ -1,6 +1,7 @@
 """Experiments List tab component."""
 
 import gradio as gr
+from config.settings import DEFAULT_LIMITS
 from loguru import logger
 from utils.formatters import (
     build_experiment_selector_choices,
@@ -29,7 +30,7 @@ class ExperimentsListComponent(BaseComponent):
             except Exception as e:
                 logger.warning(f"Failed to load experiments table during initialization: {e}")
                 initial_table = None
-            
+
             experiments_df = gr.Dataframe(value=initial_table, label="Experiments", interactive=False)
 
             with gr.Row():
@@ -95,6 +96,10 @@ class ExperimentsListComponent(BaseComponent):
 
         # Update experiment selector when dataframe changes
         experiments_df.change(self._update_experiment_selector, inputs=experiments_df, outputs=experiment_selector)
+
+        # Auto-refresh experiments table and selector periodically
+        timer = gr.Timer(DEFAULT_LIMITS["refresh_interval"])
+        timer.tick(refresh_and_update_selector, outputs=[experiments_df, experiment_selector])
 
     def _get_experiments_table(self):
         """Get experiments as a pandas DataFrame."""

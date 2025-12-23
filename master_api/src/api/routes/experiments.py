@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import tempfile
 from typing import Any, Dict, List
-from uuid import uuid4
 
 import aiofiles
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from loguru import logger
 
-from ...models.experiment import Experiment, ExperimentCreate, ExperimentConfig, PromptExperimentCreate
+from common.llm_registry import get_allowed_llm_model_ids, is_allowed_llm_model
+
+from ...models.experiment import Experiment, ExperimentConfig, ExperimentCreate, PromptExperimentCreate
 from ...services.experiment_service import ExperimentService
 from ...services.service_manager import ServiceManager
 
 router = APIRouter()
 
 # Global service manager instance
-_service_manager: ServiceManager = None
+_service_manager: ServiceManager | None = None
 
 
 def set_service_manager(service_manager: ServiceManager):
@@ -36,9 +38,24 @@ def get_experiment_service() -> ExperimentService:
     return _service_manager.get_experiment_service()
 
 
-@router.post("/", response_model=Experiment)
+@router.post("/ml", response_model=Experiment)
 async def create_experiment(experiment: ExperimentCreate, service: ExperimentService = Depends(get_experiment_service)):
-    """Initialize experiment"""
+    """Create a new ML experiment (classification, regression, clustering)."""
+    if experiment.config and experiment.config.llm_model:
+        if not is_allowed_llm_model(experiment.config.llm_model):
+            allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported llm_model '{experiment.config.llm_model}'. Allowed: {allowed}",
+            )
+    if experiment.config and getattr(experiment.config, "prompt_llm_model", None):
+        plm = str(getattr(experiment.config, "prompt_llm_model"))
+        if plm and not is_allowed_llm_model(plm):
+            allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported prompt_llm_model '{plm}'. Allowed: {allowed}",
+            )
     return await service.create_experiment(experiment)
 
 
@@ -145,7 +162,20 @@ async def create_prompt_experiment(
     """Create a new prompt-based experiment: create DB record, build files, upload to storage."""
     try:
         logger.info(f"Received prompt experiment creation request: {prompt_experiment.name}")
-        import re
+        if prompt_experiment.llm_model and not is_allowed_llm_model(prompt_experiment.llm_model):
+            allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported llm_model '{prompt_experiment.llm_model}'. Allowed: {allowed}",
+            )
+        if getattr(prompt_experiment, "prompt_llm_model", None):
+            plm = str(getattr(prompt_experiment, "prompt_llm_model"))
+            if plm and not is_allowed_llm_model(plm):
+                allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported prompt_llm_model '{plm}'. Allowed: {allowed}",
+                )
 
         # Basic prompt placeholder validation
         template_pattern = r"\{([^}]+)\}"
@@ -156,33 +186,19 @@ async def create_prompt_experiment(
                 detail="Base prompt must contain at least one template placeholder in {column_name} format",
             )
 
-        # Optional simplified task_type validation
-        if prompt_experiment.task_type:
-            valid_task_types = ["classification", "multi_choice", "math", "summarization"]
-            if prompt_experiment.task_type not in valid_task_types:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid task_type. Must be one of: {', '.join(valid_task_types)}",
-                )
-
-        # Prepare validation criteria dict (optional)
-        vc_dict = None
-        try:
-            if prompt_experiment.validation_criteria is not None:
-                vc_dict = prompt_experiment.validation_criteria.dict()
-        except Exception:
-            vc_dict = None
+        # Prepare validation criteria dict
+        vc_dict = prompt_experiment.validation_criteria.dict()
 
         # Build Experiment config and create DB record
         config = ExperimentConfig(
             description=prompt_experiment.description or "",
             parameters={
-                "task_type": (prompt_experiment.task_type or "prompt"),
                 "target_column": prompt_experiment.target_column,
                 "base_prompt": prompt_experiment.base_prompt,
-                **({"validation_criteria": vc_dict} if vc_dict else {}),
+                "validation_criteria": vc_dict,
             },
             llm_model=prompt_experiment.llm_model,
+            prompt_llm_model=getattr(prompt_experiment, "prompt_llm_model", None),
             max_iterations=prompt_experiment.max_iterations,
         )
         experiment_create = ExperimentCreate(
@@ -191,29 +207,30 @@ async def create_prompt_experiment(
             data_path=prompt_experiment.data_path,
         )
 
-        # Create experiment directly in DB to avoid Kafka workflow for prompt presets
-        from ...services.database_service import DatabaseService  # noqa: F401
         global _service_manager
         if not _service_manager:
             raise HTTPException(status_code=503, detail="Service manager not initialized")
         db = _service_manager.get_db_service()
         from uuid import uuid4
+
         experiment_id = f"exp_{uuid4()}"
         await db.create_experiment(experiment_create, experiment_id)
 
         # Build and upload prompt experiment files to storage so it's ready to start
         try:
-            from ...services.service_manager import ServiceManager  # noqa: F401
             if _service_manager and hasattr(_service_manager, "creation_service"):
                 creation = _service_manager.creation_service
+                if creation is None:
+                    raise Exception("Experiment Creation service is not initialized!")
                 prompt_spec: Dict[str, Any] = {
                     "name": prompt_experiment.name,
                     "description": prompt_experiment.description or "",
                     "data_path": prompt_experiment.data_path,
                     "target_column": prompt_experiment.target_column,
                     "base_prompt": prompt_experiment.base_prompt,
-                    "validation_criteria": (vc_dict or {}),
+                    "validation_criteria": vc_dict,
                     "llm_model": prompt_experiment.llm_model,
+                    "prompt_llm_model": getattr(prompt_experiment, "prompt_llm_model", None),
                     "max_iterations": prompt_experiment.max_iterations,
                 }
                 await creation.create_prompt_experiment_files(experiment_id, prompt_spec, prompt_experiment.data_path)

@@ -184,6 +184,28 @@ class InstancesComponent(BaseComponent):
         # Health refresh
         refresh_health_btn.click(self._get_health_summary, outputs=health_display)
 
+        # Auto-refresh instances table and selectors periodically
+        def refresh_instances_and_selectors():
+            """Refresh instances table and update all selectors."""
+            updated_table = self._get_instances_table()
+            if updated_table is not None and len(updated_table) > 0:
+                instances = self.inst_manager.list_instances()
+                choices = build_instance_selector_choices(instances)
+            else:
+                choices = []
+            return (
+                updated_table,
+                gr.Dropdown(choices=choices, interactive=True),
+                gr.Dropdown(choices=choices, interactive=True),
+                gr.Dropdown(choices=choices, interactive=True),
+            )
+
+        timer = gr.Timer(DEFAULT_LIMITS["refresh_interval"])
+        timer.tick(
+            refresh_instances_and_selectors,
+            outputs=[instances_df, instance_selector, detail_instance_selector, logs_instance_selector],
+        )
+
     def _get_instances_table(self):
         """Get instances as a pandas DataFrame."""
         instances = self.inst_manager.list_instances()

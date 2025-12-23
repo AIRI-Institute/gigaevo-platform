@@ -13,4 +13,5 @@ python -m tools.prompt_wizard "emotion" \
     --task-description "emotion classification by selecting the correct emotion (sadness, joy, love, anger, fear, or surprise) from text" \
     --dataset-path problems/promptevolve/examples/emotion/dataset/train.csv \
     --target-field target \
+    --regexp-pattern "Answer:\s*([A-F])" \
     --overwrite

@@ -144,8 +144,8 @@ services:
   # Master API (Development)
   master-api:
     build:
-      context: ./master_api
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: master_api/Dockerfile.dev
     env_file:
       - .env
     environment:
@@ -172,6 +172,8 @@ services:
     volumes:
       - ./master_api/src:/app/src
       - input_data:/app/input_data
+      - ./llm_models.yml:/llm_models.yml:ro
+      - ./common:/app/common:ro
     command:
       [
         "uv",
@@ -193,8 +195,8 @@ services:
   # Runner API (Development)
   runner-api:
     build:
-      context: ./runner_api
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: runner_api/Dockerfile.dev
     env_file:
       - .env
     environment:
@@ -222,6 +224,8 @@ services:
       - ./runner_api/repos:/app/repos
       - ./master_api/src:/app/master_api/src:ro
       - input_data:/app/input_data
+      - ./llm_models.yml:/llm_models.yml:ro
+      - ./common:/app/common:ro
     command:
       [
         "uv",
@@ -245,8 +249,8 @@ services:
   # Web UI (Development)
   web-ui:
     build:
-      context: ./web_ui
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: web_ui/Dockerfile.dev
     env_file:
       - .env
     environment:
@@ -261,6 +265,8 @@ services:
         condition: service_healthy
     volumes:
       - ./web_ui:/app
+      - ./llm_models.yml:/llm_models.yml:ro
+      - ./common:/common:ro
     command: ["uv", "run", "python", "app.py"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7860"]

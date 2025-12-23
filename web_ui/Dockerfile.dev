@@ -2,6 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app:/
+
 # Install system dependencies including development tools
 RUN apt-get update && apt-get install -y \
     curl \
@@ -10,13 +12,13 @@ RUN apt-get update && apt-get install -y \
     && pip install uv
 
 # Copy only pyproject.toml during build (app.py will be mounted as volume)
-COPY pyproject.toml .
+COPY web_ui/pyproject.toml ./pyproject.toml
 
 # Install the application using uv
 RUN uv sync
 
 # Copy entrypoint script
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY web_ui/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Create directories and user (will be adjusted in entrypoint)

@@ -10,6 +10,7 @@ dependencies = [
     "pandas>=2.0.0",
     "plotly>=5.0.0",
     "httpx",
+    "pyyaml>=6.0.1",
     "pytest",
     "matplotlib>=3.10.7",
 ]

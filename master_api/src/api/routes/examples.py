@@ -5,11 +5,18 @@ import json
 import os
 import re
 from typing import Dict, List, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from ...models.experiment import Experiment, ExperimentConfig, ExperimentCreate, PromptExperimentCreate
+from ...models.experiment import (
+    Experiment,
+    ExperimentConfig,
+    ExperimentCreate,
+    PromptExperimentCreate,
+    PromptValidationCriteria,
+)
 from ...services.service_manager import ServiceManager
 
 router = APIRouter()
@@ -27,32 +34,32 @@ def _examples_dir() -> str:
     here = os.path.dirname(__file__)
     return os.path.normpath(os.path.join(here, "..", "..", "..", "data_examples"))
 
+
 def _prompt_examples_dir() -> str:
     # repo_root/master_api/prompt_examples
     here = os.path.dirname(__file__)
-    return os.path.normpath(
-        os.path.join(here, "..", "..", "..", "prompt_examples")
-    )
+    return os.path.normpath(os.path.join(here, "..", "..", "..", "prompt_examples"))
 
 
 def _humanize(name: str) -> str:
     return name.replace("_", " ").strip().title()
+
 
 def _local_prompt_examples_dir() -> str:
     # repo_root/master_api/prompt_examples
     here = os.path.dirname(__file__)
     return os.path.normpath(os.path.join(here, "..", "..", "..", "prompt_examples"))
 
+
 def _extract_prompt_template(baseline_path: str) -> str:
     """Extract PROMPT_TEMPLATE content from initial_programs/baseline.py."""
     try:
         with open(baseline_path, "r", encoding="utf-8") as f:
             content = f.read()
-        import re as _re
         # Match PROMPT_TEMPLATE = """...""" or '''...''' or "..." or '...'
-        pattern = _re.compile(
+        pattern = re.compile(
             r"PROMPT_TEMPLATE\s*=\s*(?P<q>\"\"\"|'''|\"|')(?P<body>.*?)(?P=q)",
-            _re.DOTALL,
+            re.DOTALL,
         )
         m = pattern.search(content)
         if m:
@@ -60,6 +67,7 @@ def _extract_prompt_template(baseline_path: str) -> str:
     except Exception:
         pass
     return ""
+
 
 def _extract_prompt_template_from_sh(create_sh_path: str) -> str:
     """
@@ -72,20 +80,20 @@ def _extract_prompt_template_from_sh(create_sh_path: str) -> str:
             return ""
         with open(create_sh_path, "r", encoding="utf-8") as f:
             content = f.read()
-        import re as _re
+
         # Match export PROMPT_TEMPLATE="...(heredoc)..."
         # Capture content between EOF markers in common variants
-        pattern = _re.compile(
+        pattern = re.compile(
             r"export\s+PROMPT_TEMPLATE\s*=\s*\"\$\(\s*cat\s*<<\s*['\"]?EOF['\"]?\s*\n(?P<body>[\s\S]*?)\nEOF\s*\)\"",
-            _re.MULTILINE,
+            re.MULTILINE,
         )
         m = pattern.search(content)
         if m:
             return m.group("body").strip("\n")
         # Fallback: simple inline assignment export PROMPT_TEMPLATE='...'
-        pattern_inline = _re.compile(
+        pattern_inline = re.compile(
             r"export\s+PROMPT_TEMPLATE\s*=\s*(?P<q>\"\"\"|'''|\"|')(?P<body>.*?)(?P=q)",
-            _re.DOTALL,
+            re.DOTALL,
         )
         m2 = pattern_inline.search(content)
         if m2:
@@ -184,8 +192,14 @@ async def list_prompt_examples():
 
 
 def _parse_create_sh(example_dir: str) -> Dict[str, str]:
-    """Parse create.sh to extract dataset path, target field, and task description if present."""
-    result = {"dataset_path": "", "target_field": "target", "task_description": "", "task_type": ""}
+    """Parse create.sh to extract dataset path, target field, task description, and regexp pattern if present."""
+    result = {
+        "dataset_path": "",
+        "target_field": "target",
+        "task_description": "",
+        "task_type": "",
+        "regexp_pattern": "",
+    }
     create_path = os.path.join(example_dir, "create.sh")
     if not os.path.exists(create_path):
         return result
@@ -204,6 +218,9 @@ def _parse_create_sh(example_dir: str) -> Dict[str, str]:
         m_tt = re.search(r"--task-type\s+([^\s\\]+)", content)
         if m_tt:
             result["task_type"] = m_tt.group(1).strip()
+        m_rp = re.search(r'--regexp-pattern\s+"([^"]+)"', content)
+        if m_rp:
+            result["regexp_pattern"] = m_rp.group(1).strip()
     except Exception:
         pass
     return result
@@ -241,7 +258,9 @@ async def get_prompt_example_details(name: str):
                     headers = next(reader, [])
                 feature_cols = [h for h in headers if h and h != target_field]
                 features_text = "\n".join([f"- {{{col}}}" for col in feature_cols])
-                task_desc = parsed.get("task_description") or "Analyze features and predict the target based on context."
+                task_desc = (
+                    parsed.get("task_description") or "Analyze features and predict the target based on context."
+                )
                 baseline_prompt = (
                     f"{task_desc}\n\n"
                     f"Available Features:\n{features_text}\n\n"
@@ -255,9 +274,17 @@ async def get_prompt_example_details(name: str):
         task_type = (parsed.get("task_type") or "").lower()
         validation_defaults: Dict[str, Optional[str]] = {}
         if task_type in {"classification", "multi_choice", "math"}:
-            validation_defaults = {"validation_type": "Binary (0/1)", "binary_method": "equality", "continuous_metric": None}
+            validation_defaults = {
+                "validation_type": "Binary (0/1)",
+                "binary_method": "equality",
+                "continuous_metric": None,
+            }
         elif task_type in {"summarization"}:
-            validation_defaults = {"validation_type": "Continuous (0..1)", "binary_method": None, "continuous_metric": "ROUGE-L"}
+            validation_defaults = {
+                "validation_type": "Continuous (0..1)",
+                "binary_method": None,
+                "continuous_metric": "ROUGE-L",
+            }
         else:
             validation_defaults = {"validation_type": None, "binary_method": None, "continuous_metric": None}
 
@@ -344,13 +371,14 @@ async def create_prompt_experiment_from_prompt_example(name: str):
             data_path=object_name,
             target_column=target_field,
             base_prompt=base_prompt,
-            validation_criteria={
-                "validation_type": "Binary (0/1)",
-                "binary_method": "equality",
-                "regexp_pattern": None,
-                "continuous_metric": None,
-            },
+            validation_criteria=PromptValidationCriteria(
+                validation_type="Binary (0/1)",
+                binary_method="equality",
+                regexp_pattern=None,
+                continuous_metric=None,
+            ),
             llm_model="local-inference",
+            prompt_llm_model=None,
             max_iterations=100,
         )
 
@@ -358,6 +386,8 @@ async def create_prompt_experiment_from_prompt_example(name: str):
         db = _service_manager.get_db_service()
         exp_service = _service_manager.get_experiment_service()
         creation = _service_manager.creation_service
+        if creation is None:
+            raise Exception("Experiment Creation service is not initialized!")
 
         config = ExperimentConfig(
             description=pec.description or "",
@@ -365,14 +395,13 @@ async def create_prompt_experiment_from_prompt_example(name: str):
                 "task_type": (parsed.get("task_type") or "classification"),
                 "target_column": pec.target_column,
                 "base_prompt": pec.base_prompt,
-                "validation_criteria": pec.validation_criteria.dict(),
+                "validation_criteria": pec.validation_criteria.model_dump(),
             },
             llm_model=pec.llm_model,
+            prompt_llm_model=pec.prompt_llm_model,
             max_iterations=pec.max_iterations,
         )
         exp_create = ExperimentCreate(name=pec.name, config=config, data_path=pec.data_path)
-
-        from uuid import uuid4
 
         experiment_id = f"exp_{uuid4()}"
         await db.create_experiment(exp_create, experiment_id)
@@ -384,7 +413,7 @@ async def create_prompt_experiment_from_prompt_example(name: str):
             "data_path": pec.data_path,
             "target_column": pec.target_column,
             "base_prompt": pec.base_prompt,
-            "validation_criteria": pec.validation_criteria.dict(),
+            "validation_criteria": pec.validation_criteria.model_dump(),
             "llm_model": pec.llm_model,
             "max_iterations": pec.max_iterations,
         }
@@ -399,6 +428,7 @@ async def create_prompt_experiment_from_prompt_example(name: str):
 
     except Exception as e:
         return JSONResponse({"error": f"failed_to_create_prompt_experiment_from_example: {e}"}, status_code=500)
+
 
 #
 # Local prompt presets under master_api/prompt_examples
@@ -428,26 +458,12 @@ async def get_local_prompt_preset(name: str):
     if not os.path.isdir(example_dir):
         return JSONResponse({"error": "not_found"}, status_code=404)
     try:
-        # Parse create.sh for task settings
-        create_sh = os.path.join(example_dir, "create.sh")
-        task_type = ""
-        target_field = "target"
-        task_description = ""
-        if os.path.exists(create_sh):
-            try:
-                with open(create_sh, "r", encoding="utf-8") as f:
-                    sh = f.read()
-                m_tt = re.search(r"--task-type\s+([^\s\\]+)", sh)
-                if m_tt:
-                    task_type = m_tt.group(1).strip()
-                m_tf = re.search(r"--target-field\s+([^\s\\]+)", sh)
-                if m_tf:
-                    target_field = m_tf.group(1).strip()
-                m_td = re.search(r'--task-description\s+"([^"]+)"', sh)
-                if m_td:
-                    task_description = m_td.group(1).strip()
-            except Exception:
-                pass
+        # Parse create.sh for task settings using shared helper
+        parsed = _parse_create_sh(example_dir)
+        task_type = parsed.get("task_type") or ""
+        target_field = parsed.get("target_field") or "target"
+        task_description = parsed.get("task_description") or ""
+        regexp_pattern = parsed.get("regexp_pattern") or ""
 
         baseline_path = os.path.join(example_dir, "initial_programs", "baseline.py")
         baseline_prompt = _extract_prompt_template(baseline_path) if os.path.exists(baseline_path) else ""
@@ -462,9 +478,17 @@ async def get_local_prompt_preset(name: str):
         tt_lower = task_type.lower()
         validation_defaults: Dict[str, Optional[str]] = {}
         if tt_lower in {"classification", "multi_choice", "math"}:
-            validation_defaults = {"validation_type": "Binary (0/1)", "binary_method": "equality", "continuous_metric": None}
+            validation_defaults = {
+                "validation_type": "Binary (0/1)",
+                "binary_method": "equality",
+                "continuous_metric": None,
+            }
         elif tt_lower in {"summarization"}:
-            validation_defaults = {"validation_type": "Continuous (0..1)", "binary_method": None, "continuous_metric": "ROUGE-L"}
+            validation_defaults = {
+                "validation_type": "Continuous (0..1)",
+                "binary_method": None,
+                "continuous_metric": "ROUGE-L",
+            }
         else:
             validation_defaults = {"validation_type": None, "binary_method": None, "continuous_metric": None}
         return {
@@ -478,10 +502,12 @@ async def get_local_prompt_preset(name: str):
             "task_type": task_type,
             "target_field": target_field,
             "task_description": task_description,
+            "regexp_pattern": regexp_pattern,
             "validation_defaults": validation_defaults,
         }
     except Exception as e:
         return JSONResponse({"error": f"failed_to_get_local_prompt_preset: {e}"}, status_code=500)
+
 
 @router.post("/api/v1/prompt-presets/local/{name}/create")
 async def create_prompt_experiment_from_local_preset(name: str):
@@ -502,29 +528,16 @@ async def create_prompt_experiment_from_local_preset(name: str):
         return JSONResponse({"error": "not_found"}, status_code=404)
 
     try:
-        # Parse create.sh
-        create_sh = os.path.join(example_dir, "create.sh")
-        task_type = ""
-        target_field = "target"
-        task_description = ""
-        if os.path.exists(create_sh):
-            try:
-                with open(create_sh, "r", encoding="utf-8") as f:
-                    sh = f.read()
-                m_tt = re.search(r"--task-type\s+([^\s\\]+)", sh)
-                if m_tt:
-                    task_type = m_tt.group(1).strip()
-                m_tf = re.search(r"--target-field\s+([^\s\\]+)", sh)
-                if m_tf:
-                    target_field = m_tf.group(1).strip()
-                m_td = re.search(r'--task-description\s+"([^"]+)"', sh)
-                if m_td:
-                    task_description = m_td.group(1).strip()
-            except Exception:
-                pass
+        # Parse create.sh using shared helper
+        parsed = _parse_create_sh(example_dir)
+        task_type = parsed.get("task_type") or ""
+        target_field = parsed.get("target_field") or "target"
+        task_description = parsed.get("task_description") or ""
+        regexp_pattern = parsed.get("regexp_pattern") or ""
 
         # Baseline prompt from initial_programs/baseline.py (optional), fallback to create.sh PROMPT_TEMPLATE
         baseline_path = os.path.join(example_dir, "initial_programs", "baseline.py")
+        create_sh = os.path.join(example_dir, "create.sh")
         base_prompt = _extract_prompt_template(baseline_path) if os.path.exists(baseline_path) else ""
         if not base_prompt:
             base_prompt = _extract_prompt_template_from_sh(create_sh) or ""
@@ -551,10 +564,12 @@ async def create_prompt_experiment_from_local_preset(name: str):
                 return JSONResponse({"error": "upload_failed"}, status_code=500)
 
         # Prepare payloads and create DB record
-        from ...models.experiment import ExperimentConfig, ExperimentCreate
-        db = _service_manager.get_db_service()
         exp_service = _service_manager.get_experiment_service()
+        if exp_service is None:
+            raise Exception("Experiment service is not initialized!")
         creation = _service_manager.creation_service
+        if creation is None:
+            raise Exception("Experiment Creation service is not initialized!")
 
         human_name = name.replace("_", " ").title()
         config = ExperimentConfig(
@@ -564,13 +579,20 @@ async def create_prompt_experiment_from_local_preset(name: str):
                 "target_column": target_field,
                 "base_prompt": base_prompt,
                 "validation_criteria": {
-                    "validation_type": "Binary (0/1)" if task_type.lower() in {"classification", "multi_choice", "math"} else "Continuous (0..1)",
-                    "binary_method": "equality" if task_type.lower() in {"classification", "multi_choice", "math"} else None,
-                    "regexp_pattern": None,
+                    "validation_type": "Binary (0/1)"
+                    if task_type.lower() in {"classification", "multi_choice", "math"}
+                    else "Continuous (0..1)",
+                    "binary_method": "regexp"
+                    if regexp_pattern
+                    else "equality"
+                    if task_type.lower() in {"classification", "multi_choice", "math"}
+                    else None,
+                    "regexp_pattern": regexp_pattern or None,
                     "continuous_metric": "ROUGE-L" if task_type.lower() in {"summarization"} else None,
                 },
             },
             llm_model="local-inference",
+            prompt_llm_model=None,
             max_iterations=100,
         )
         exp_create = ExperimentCreate(name=human_name, config=config, data_path=object_name)
@@ -598,6 +620,7 @@ async def create_prompt_experiment_from_local_preset(name: str):
 
     except Exception as e:
         return JSONResponse({"error": f"failed_to_create_local_prompt_preset_experiment: {e}"}, status_code=500)
+
 
 @router.post("/api/v1/prompt-presets/local/{name}/upload")
 async def upload_local_prompt_preset_dataset(name: str):
@@ -628,6 +651,7 @@ async def upload_local_prompt_preset_dataset(name: str):
     except Exception as e:
         return JSONResponse({"error": f"failed_to_upload_local_prompt_preset: {e}"}, status_code=500)
 
+
 @router.post("/api/v1/prompt-examples/build-all")
 async def build_all_prompt_examples():
     """
@@ -643,8 +667,9 @@ async def build_all_prompt_examples():
 
     try:
         db = _service_manager.get_db_service()
-        exp_service = _service_manager.get_experiment_service()
         creation = _service_manager.creation_service
+        if creation is None:
+            raise Exception("Experiment Creation service is not initialized!")
 
         results: List[Dict[str, str]] = []
 
@@ -664,13 +689,12 @@ async def build_all_prompt_examples():
                 continue
 
             # Create DB experiment
-            from uuid import uuid4
-
             human_name = name.replace("_", " ").title()
             config = ExperimentConfig(
                 description=task_desc,
                 parameters={"task_type": "prompt", "target_column": target_field},
                 llm_model="local-inference",
+                prompt_llm_model=None,
                 max_iterations=100,
             )
             exp_create = ExperimentCreate(name=human_name, config=config, data_path="")

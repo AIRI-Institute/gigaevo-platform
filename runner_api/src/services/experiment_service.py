@@ -577,7 +577,7 @@ class ExperimentService:
         try:
             experiment_id_str = str(experiment_id)
             workspace = self._experiment_workspaces / experiment_id_str
-            
+
             # Try evolution.log first (new location)
             log_file = workspace / "logs" / "evolution.log"
             if not log_file.exists():

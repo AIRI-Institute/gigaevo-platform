@@ -5,7 +5,6 @@ from typing import Optional
 
 import gradio as gr
 from config.settings import (
-    AVAILABLE_LLM_MODELS,
     TASK_TYPES,
     VALIDATION_RULES,
 )
@@ -24,6 +23,8 @@ from utils.validators import (
     validate_file_upload,
     validate_max_iterations,
 )
+
+from common.llm_registry import get_default_llm_model_id, get_llm_model_choices
 
 from .base import BaseComponent
 
@@ -127,8 +128,8 @@ class CreateExperimentComponent(BaseComponent):
                         label="Max Iterations",
                     )
                     llm_model_input = gr.Dropdown(
-                        choices=AVAILABLE_LLM_MODELS,
-                        value=AVAILABLE_LLM_MODELS[0],
+                        choices=get_llm_model_choices(),  # (label, id)
+                        value=get_default_llm_model_id(),  # id
                         label="LLM Model",
                     )
                     spec_preview_btn = gr.Button("Preview Spec JSON")

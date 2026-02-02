@@ -12,7 +12,15 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-TASK_TYPES = ("classification", "regression", "clustering")
+TASK_TYPES = (
+    "classification",
+    "regression",
+    "clustering",
+    "classification_automl",
+    "regression_automl",
+    "clustering_automl",
+    "classification_catboost",
+)
 
 
 def _default_output_root() -> Path:
@@ -113,7 +121,13 @@ def build_uuid_experiment(
             df = pd.read_csv(ds_str)
 
     # Validate target field presence for supervised tasks
-    if task_type in ("classification", "regression"):
+    if task_type in (
+        "classification",
+        "regression",
+        "classification_automl",
+        "regression_automl",
+        "classification_catboost",
+    ):
         if not target_field:
             raise ValueError(
                 "Target column is required for supervised tasks. "
@@ -124,15 +138,23 @@ def build_uuid_experiment(
                 f"Target column '{target_field}' not found in dataset. Available columns: {list(df.columns)}"
             )
 
-    exclude = target_field if task_type in ("classification", "regression") else None
+    # Map internal variants (e.g. *_automl, *_catboost) to their base task type
+    base_task_type = task_type
+    for suffix in ("_automl", "_catboost"):
+        if base_task_type.endswith(suffix):
+            base_task_type = base_task_type[: -len(suffix)]
+            break
+
+    exclude = target_field if base_task_type in ("classification", "regression") else None
     input_fields_formatted, input_columns = _infer_schema_fields(df, exclude)
 
-    # Compute fitness bounds per task type (used by metrics.yaml)
+    # Compute fitness bounds per task type (used by metrics.yaml).
+    # AutoML variants share the same bounds as their base task type.
     min_max = {
         "classification": (0.0, 1.0),
         "regression": (0.0, 1.0),
         "clustering": (-1.0, 1.0),
-    }[task_type]
+    }[base_task_type]
 
     placeholders = {
         "task_description": task_description,

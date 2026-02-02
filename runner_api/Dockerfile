@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     ca-certificates \
+    gosu \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && pip install uv
@@ -25,12 +26,17 @@ COPY common/ ./common/
 # Install the application using uv
 RUN uv sync
 
-# Create directories for GigaEvolve cloning
-RUN mkdir -p /tmp/gigavolve && \
-    useradd -m -u 1000 gigaevouser && \
-    chown -R gigaevouser:gigaevouser /app /tmp/gigavolve
+# Copy entrypoint script (fixes volume ownership and drops privileges via gosu)
+COPY runner_api/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
-USER gigaevouser
+# Create directories for GigaEvolve cloning (best-effort; volume mounts may override ownership at runtime)
+RUN mkdir -p /tmp/gigavolve /tmp/problems && \
+    useradd -m -u 1000 gigaevouser && \
+    chown -R gigaevouser:gigaevouser /app /tmp/gigavolve /tmp/problems
+
+# Set entrypoint (will switch to gigaevouser)
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Expose port
 EXPOSE 8001

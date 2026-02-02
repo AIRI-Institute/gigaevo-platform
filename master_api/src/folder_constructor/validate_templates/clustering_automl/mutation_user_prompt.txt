@@ -1,0 +1,35 @@
+🔬 MUTATION MANDATE — CLUSTERING (FEATURE SELECTION, AUTOML VARIANT)
+You are given one or more input programs (parents) with metrics, insights, and lineage.
+Your task: produce a new mutant that improves downstream silhouette by selecting a better subset of features.
+
+INSIGHT SOURCES:
+- Program insights: redundant/noisy features, scaling sensitivity, informative dimensions
+- Lineage: measured deltas and causal explanations (which features helped/hurt)
+
+REQUIREMENTS:
+- Integrate at least two insights from different categories
+- Make a clearly traceable change INSIDE EVOLVE-BLOCK that adjusts selection logic
+
+STRICT INTERFACE:
+- Implement: def entrypoint(context: dict[str, np.ndarray]) -> np.ndarray
+- Context: X_train (N,D), X_test (M,D)
+- Return: (K,) int64 unique column indices to keep
+
+EVOLVE-BLOCK RULES:
+- Modify only inside EVOLVE-BLOCK-START / EVOLVE-BLOCK-END
+- Keep function names and signatures outside the block unchanged
+- Ensure determinism when possible (random_state)
+
+VALIDATION & CONSTRAINTS:
+- Efficiency: maintain reasonable runtime/memory
+- Output: 1D int64 indices, unique, within [0..D-1]
+
+OUTPUT FORMAT:
+- Return the COMPLETE Python source file only; no explanations or extra text
+- Preserve EVOLVE-BLOCK fences and the entrypoint signature exactly
+
+=== Parents ({count}) ===
+{parent_blocks}
+
+
+

@@ -1,4 +1,4 @@
-.PHONY: help install dev prod clean lint format test docker-build docker-up docker-down deploy-infrastructure deploy-applications check-secrets
+.PHONY: help install dev prod clean clean-dev clean-deploy lint format test docker-build docker-up docker-down deploy-infrastructure deploy-applications check-secrets
 
 # Default target
 help:
@@ -8,7 +8,9 @@ help:
 	@echo "  install                - Install all dependencies"
 	@echo "  dev                    - Start development environment"
 	@echo "  prod                   - Start production environment"
-	@echo "  clean                  - Clean up containers and volumes"
+	@echo "  clean                  - Nuke dev + deploy environments"
+	@echo "  clean-dev              - Nuke dev stack + local artifacts"
+	@echo "  clean-deploy           - Nuke deploy stack + volumes"
 	@echo ""
 	@echo "📊 Individual Services:"
 	@echo "  master-api             - Run Master API locally"
@@ -67,7 +69,80 @@ dev: check-secrets
 	@echo "   • MinIO Console:  http://localhost:9001"
 	@echo "   • Kafka UI:       http://localhost:8080"
 	@echo ""
-	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose -f docker-compose.dev.yml up --build
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	RUNNER_POOL_SIZE=$${RUNNER_POOL_SIZE:-1}; \
+	RUNNER_REDIS_DB_START=$${RUNNER_REDIS_DB_START:-1}; \
+	REDIS_DATABASES_MIN=$${REDIS_DATABASES_MIN:-512}; \
+	export RUNNER_POOL_SIZE RUNNER_REDIS_DB_START; \
+	req_dbs=$$((RUNNER_REDIS_DB_START + RUNNER_POOL_SIZE)); \
+	if [ $$req_dbs -gt $$REDIS_DATABASES_MIN ]; then \
+		max_pool=$$((REDIS_DATABASES_MIN - RUNNER_REDIS_DB_START)); \
+		echo "❌ ERROR: RUNNER_POOL_SIZE=$$RUNNER_POOL_SIZE exceeds Redis DB limit." ; \
+		echo "   Required databases: RUNNER_REDIS_DB_START($$RUNNER_REDIS_DB_START) + RUNNER_POOL_SIZE($$RUNNER_POOL_SIZE) = $$req_dbs" ; \
+		echo "   Configured REDIS_DATABASES_MIN=$$REDIS_DATABASES_MIN" ; \
+		echo "   Max supported RUNNER_POOL_SIZE is $$max_pool (for RUNNER_REDIS_DB_START=$$RUNNER_REDIS_DB_START)." ; \
+		exit 1; \
+	fi; \
+	export REDIS_DATABASES=$$REDIS_DATABASES_MIN; \
+	python3 generate_runner_pool_compose.py --mode dev --output docker-compose.runner-pool.dev.generated.yml; \
+	HOST_UID=$$(id -u) HOST_GID=$$(id -g) docker compose -f docker-compose.dev.yml -f docker-compose.runner-pool.dev.generated.yml up --build
+
+# When CLEAN_PRUNE=0, skip docker system prune (used by `clean` to prune once).
+CLEAN_PRUNE ?= 1
+
+# Nuke everything (dev + deploy). DANGEROUS: removes volumes => wipes DB/MinIO.
+clean:
+	@echo "🧹 Cleaning EVERYTHING (dev + deploy)..."
+	@$(MAKE) clean-dev CLEAN_PRUNE=0
+	@$(MAKE) clean-deploy CLEAN_PRUNE=0
+	@echo "Pruning unused Docker data (once)..." ; \
+		docker system prune -f; \
+		echo "✅ clean complete."
+
+# Clean up all generated/dev artifacts (DANGEROUS: removes volumes => wipes DB/MinIO)
+clean-dev:
+	@echo "🧹 Cleaning DEV environment (containers, volumes, generated files)..."
+	@set -e; \
+		echo "Stopping dev stack (including generated runner pool)..." ; \
+		if [ -f docker-compose.runner-pool.dev.generated.yml ]; then \
+			docker compose -f docker-compose.dev.yml -f docker-compose.runner-pool.dev.generated.yml down -v --remove-orphans || true; \
+		else \
+			docker compose -f docker-compose.dev.yml down -v --remove-orphans || true; \
+		fi; \
+		echo "Stopping any legacy/default compose stack..." ; \
+		docker compose down -v --remove-orphans || true; \
+		echo "Removing generated compose files..." ; \
+		rm -f docker-compose.runner-pool.dev.generated.yml; \
+		echo "Removing runner clone directories (runner_api/repos/gigaevo-core-*)..." ; \
+		rm -rf runner_api/repos/gigaevo-core-*; \
+		if [ "$(CLEAN_PRUNE)" = "1" ]; then \
+			echo "Pruning unused Docker data..." ; \
+			docker system prune -f; \
+		fi; \
+		echo "✅ clean-dev complete."
+
+# Clean up all deploy artifacts (DANGEROUS: removes volumes => wipes DB/MinIO)
+clean-deploy:
+	@echo "🧹 Cleaning DEPLOY environment (containers, volumes, generated files)..."
+	@set -e; \
+		echo "Stopping deploy stack via deploy.sh (best-effort)..." ; \
+		./deploy.sh stop || true; \
+		echo "Stopping deploy compose stacks (with volumes)..." ; \
+		if [ -f docker-compose.runner-pool.generated.yml ]; then \
+			docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-pool.generated.yml -f docker-compose.web-ui.yml down -v --remove-orphans || true; \
+		elif [ -f docker-compose.runner-api.yml ]; then \
+			docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-api.yml -f docker-compose.web-ui.yml down -v --remove-orphans || true; \
+		else \
+			docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.web-ui.yml down -v --remove-orphans || true; \
+		fi; \
+		docker compose -f docker-compose.kafka.yml down -v --remove-orphans || true; \
+		echo "Removing generated compose files..." ; \
+		rm -f docker-compose.runner-pool.generated.yml; \
+		if [ "$(CLEAN_PRUNE)" = "1" ]; then \
+			echo "Pruning unused Docker data..." ; \
+			docker system prune -f; \
+		fi; \
+		echo "✅ clean-deploy complete."
 
 # Production (legacy - use deploy instead)
 prod: check-secrets
@@ -85,9 +160,24 @@ deploy-infrastructure:
 
 deploy-applications: check-secrets
 	@echo "🎯 Deploying application services..."
-	docker compose -f docker-compose.master-api.yml up -d --build
-	docker compose -f docker-compose.runner-api.yml up -d --build
-	docker compose -f docker-compose.web-ui.yml up -d --build
+	@RUNNER_POOL_SIZE=$${RUNNER_POOL_SIZE:-1}; \
+	RUNNER_REDIS_DB_START=$${RUNNER_REDIS_DB_START:-1}; \
+	REDIS_DATABASES_MIN=$${REDIS_DATABASES_MIN:-512}; \
+	export RUNNER_POOL_SIZE RUNNER_REDIS_DB_START; \
+	req_dbs=$$((RUNNER_REDIS_DB_START + RUNNER_POOL_SIZE)); \
+	if [ $$req_dbs -gt $$REDIS_DATABASES_MIN ]; then \
+		max_pool=$$((REDIS_DATABASES_MIN - RUNNER_REDIS_DB_START)); \
+		echo "❌ ERROR: RUNNER_POOL_SIZE=$$RUNNER_POOL_SIZE exceeds Redis DB limit." ; \
+		echo "   Required databases: RUNNER_REDIS_DB_START($$RUNNER_REDIS_DB_START) + RUNNER_POOL_SIZE($$RUNNER_POOL_SIZE) = $$req_dbs" ; \
+		echo "   Configured REDIS_DATABASES_MIN=$$REDIS_DATABASES_MIN" ; \
+		echo "   Max supported RUNNER_POOL_SIZE is $$max_pool (for RUNNER_REDIS_DB_START=$$RUNNER_REDIS_DB_START)." ; \
+		exit 1; \
+	fi; \
+	export REDIS_DATABASES=$$REDIS_DATABASES_MIN; \
+	python3 generate_runner_pool_compose.py --mode deploy --output docker-compose.runner-pool.generated.yml; \
+	docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml up -d --build; \
+	docker compose -f docker-compose.kafka.yml -f docker-compose.runner-pool.generated.yml up -d --build; \
+	docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.web-ui.yml up -d --build
 	@echo "✅ Applications deployed (Master API, Runner API, Web UI)"
 
 stop:

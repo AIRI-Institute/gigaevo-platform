@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from redis.asyncio import Redis
@@ -208,6 +209,177 @@ class TaskWorker:
             task.status = TaskStatus.FAILED
             task.error_message = "Failed to generate code"
 
+    async def _check_iterations_completed(
+        self, experiment_id: str, expected_max_iterations: Optional[int]
+    ) -> tuple[bool, Optional[int]]:
+        """
+        Check if experiment completed the expected number of iterations.
+        Returns (is_complete, actual_iterations) where is_complete is True if
+        actual_iterations >= expected_max_iterations or expected_max_iterations is None.
+        """
+        if expected_max_iterations is None:
+            # No limit set, consider any completion as successful
+            return True, None
+
+        try:
+            # Try to read evolution_report.json to get actual iterations
+            # Check multiple possible locations for the report
+            clone_path = Path(self.gigavolve_service.config.clone_path).resolve()
+            
+            # Try outputs/{experiment_id}/evolution_report.json first
+            output_dir = clone_path / "outputs" / experiment_id
+            report_path = output_dir / "evolution_report.json"
+            
+            # If not found, try outputs/exp_{experiment_id}/evolution_report.json
+            if not report_path.exists() and not experiment_id.startswith("exp_"):
+                output_dir = clone_path / "outputs" / f"exp_{experiment_id}"
+                report_path = output_dir / "evolution_report.json"
+
+            if not report_path.exists():
+                # Report not generated yet, try to generate it first
+                logger.info(
+                    f"Report not found for {experiment_id} at {report_path}, "
+                    "attempting to generate it from Redis data..."
+                )
+                try:
+                    # Try multiple possible output subfolders
+                    possible_subfolders = [
+                        experiment_id,
+                        f"exp_{experiment_id}" if not experiment_id.startswith("exp_") else experiment_id.replace("exp_", ""),
+                    ]
+                    
+                    report_generated = False
+                    for subfolder in possible_subfolders:
+                        try:
+                            out_subfolder = f"outputs/{subfolder}"
+                            result = await self.gigavolve_service.generate_evolution_report(experiment_id, out_subfolder)
+                            if result.get("success"):
+                                # Report generated, try reading it
+                                generated_path = result.get("output_json_file")
+                                if generated_path and Path(generated_path).exists():
+                                    report_path = Path(generated_path)
+                                    report_generated = True
+                                    logger.info(f"Successfully generated report for {experiment_id} at {report_path}")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Failed to generate report in {out_subfolder} for {experiment_id}: {e}")
+                            continue
+                    
+                    if not report_generated:
+                        # Try the standard location again after generation attempt
+                        report_path = output_dir / "evolution_report.json"
+                except Exception as e:
+                    logger.warning(f"Failed to generate report for {experiment_id}: {e}")
+
+            if not report_path.exists():
+                # Report still not available, try CSV as fallback
+                csv_path = output_dir / "evolution_report.csv"
+                if csv_path.exists():
+                    try:
+                        import pandas as pd
+
+                        df = pd.read_csv(csv_path)
+                        if "metadata_iteration" in df.columns:
+                            _iter_series = pd.to_numeric(df["metadata_iteration"], errors="coerce")
+                            if not _iter_series.empty and _iter_series.notna().any():
+                                actual_iterations = int(_iter_series.max()) + 1
+                                is_complete = actual_iterations >= expected_max_iterations
+                                logger.info(
+                                    f"Found iterations from CSV for {experiment_id}: {actual_iterations}/{expected_max_iterations}"
+                                )
+                                return is_complete, actual_iterations
+                    except Exception as e:
+                        logger.warning(f"Failed to read CSV report for {experiment_id}: {e}")
+
+                # Try to generate CSV report from Redis data as a last resort
+                logger.info(
+                    f"Report and CSV not found for {experiment_id}, attempting to generate CSV from Redis..."
+                )
+                try:
+                    # Try multiple possible output subfolders
+                    possible_subfolders = [
+                        experiment_id,
+                        f"exp_{experiment_id}" if not experiment_id.startswith("exp_") else experiment_id.replace("exp_", ""),
+                    ]
+                    
+                    for subfolder in possible_subfolders:
+                        try:
+                            out_subfolder = f"outputs/{subfolder}"
+                            # Use generate_evolution_report which will create both CSV and JSON
+                            result = await self.gigavolve_service.generate_evolution_report(experiment_id, out_subfolder)
+                            if result.get("success"):
+                                # Check if JSON was generated and can be read
+                                generated_json = result.get("output_json_file")
+                                if generated_json and Path(generated_json).exists():
+                                    report_path = Path(generated_json)
+                                    # Try reading the JSON report
+                                    try:
+                                        report_data = json.loads(report_path.read_text(encoding="utf-8"))
+                                        actual_iterations = report_data.get("total_iterations", 0)
+                                        is_complete = actual_iterations >= expected_max_iterations
+                                        logger.info(
+                                            f"Generated and read JSON report for {experiment_id}: {actual_iterations}/{expected_max_iterations}"
+                                        )
+                                        return is_complete, actual_iterations
+                                    except Exception as e:
+                                        logger.debug(f"Failed to read generated JSON for {experiment_id}: {e}")
+                                
+                                # Also try CSV (it's generated as intermediate file)
+                                clone_path = Path(self.gigavolve_service.config.clone_path).resolve()
+                                csv_path = clone_path / out_subfolder / "evolution_report.csv"
+                                if csv_path.exists():
+                                    try:
+                                        import pandas as pd
+                                        df = pd.read_csv(csv_path)
+                                        if "metadata_iteration" in df.columns:
+                                            _iter_series = pd.to_numeric(df["metadata_iteration"], errors="coerce")
+                                            if not _iter_series.empty and _iter_series.notna().any():
+                                                actual_iterations = int(_iter_series.max()) + 1
+                                                is_complete = actual_iterations >= expected_max_iterations
+                                                logger.info(
+                                                    f"Generated and read CSV for {experiment_id}: {actual_iterations}/{expected_max_iterations}"
+                                                )
+                                                return is_complete, actual_iterations
+                                    except Exception as e:
+                                        logger.debug(f"Failed to read generated CSV for {experiment_id}: {e}")
+                                
+                                # If JSON was generated, use it
+                                if generated_json and Path(generated_json).exists():
+                                    report_path = Path(generated_json)
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Failed to generate report in {out_subfolder} for {experiment_id}: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Failed to generate CSV from Redis for {experiment_id}: {e}")
+
+                # No report available - this could mean:
+                # 1. Process was killed before generating report (likely timeout or error)
+                # 2. Process completed but report generation failed
+                # 3. Redis data is not available or corrupted
+                # In this case, we can't verify completion, so assume not complete
+                logger.warning(
+                    f"Cannot verify iterations for {experiment_id}: report not found and CSV generation failed. "
+                    "This may indicate the process was interrupted before completion."
+                )
+                return False, None
+
+            # Read JSON report
+            report_data = json.loads(report_path.read_text(encoding="utf-8"))
+            actual_iterations = report_data.get("total_iterations", 0)
+            is_complete = actual_iterations >= expected_max_iterations
+
+            logger.info(
+                f"Iterations check for {experiment_id}: {actual_iterations}/{expected_max_iterations}, "
+                f"complete={is_complete}"
+            )
+            return is_complete, actual_iterations
+
+        except Exception as e:
+            logger.warning(f"Failed to check iterations for {experiment_id}: {e}")
+            # If we can't check, assume not complete to be safe
+            return False, None
+
     async def _handle_run_experiment(self, task: Task):
         """Handle experiment execution task"""
         experiment_id = str(task.experiment_id)
@@ -221,9 +393,40 @@ class TaskWorker:
         result = await self.gigavolve_service.run_experiment(experiment_id, config, cancel_check=_cancel_check)
         logger.info(f"run_experiment returned for {experiment_id}: {result}")
 
-        if result and result.get("success", False):
-            task.status = TaskStatus.COMPLETED
+        # Check if experiment timed out - this should not be treated as successful completion
+        if result and result.get("timed_out", False):
+            task.status = TaskStatus.FAILED
+            task.error_message = result.get("output", "Experiment reached time limit before completion")
             task.result = result
+        elif result and result.get("success", False):
+            # Process completed with exit code 0, but verify it reached expected iterations
+            max_iterations = config.get("max_iterations")
+            is_complete, actual_iterations = await self._check_iterations_completed(experiment_id, max_iterations)
+
+            if is_complete:
+                # Successfully completed all expected iterations
+                task.status = TaskStatus.COMPLETED
+                task.result = result
+                if actual_iterations is not None:
+                    logger.info(
+                        f"Experiment {experiment_id} completed successfully: "
+                        f"{actual_iterations}/{max_iterations} iterations"
+                    )
+            else:
+                # Process exited with code 0 but didn't complete expected iterations
+                # This could happen if process was killed or stopped prematurely
+                task.status = TaskStatus.FAILED
+                actual_str = f"{actual_iterations}" if actual_iterations is not None else "unknown"
+                expected_str = f"{max_iterations}" if max_iterations else "unlimited"
+                task.error_message = (
+                    f"Experiment stopped prematurely: completed {actual_str} iterations "
+                    f"(expected {expected_str}). Process may have been interrupted."
+                )
+                task.result = result
+                logger.warning(
+                    f"Experiment {experiment_id} exited with code 0 but only completed "
+                    f"{actual_str}/{expected_str} iterations"
+                )
         else:
             # If cancelled mid-run, honor CANCELLED status
             err_msg = result.get("error", "Unknown error") if result else "No result"

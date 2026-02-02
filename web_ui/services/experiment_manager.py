@@ -141,6 +141,17 @@ class ExperimentManager:
             response.raise_for_status()
             return response.json()
 
+        except requests.exceptions.HTTPError as e:
+            # Surface FastAPI {"detail": "..."} when available
+            detail = None
+            try:
+                if e.response is not None:
+                    detail = (e.response.json() or {}).get("detail")
+            except Exception:
+                detail = None
+            msg = detail or str(e)
+            logger.error(f"Failed to start experiment {experiment_id}: {msg}")
+            return {"error": msg}
         except requests.RequestException as e:
             logger.error(f"Failed to start experiment {experiment_id}: {e}")
             return {"error": str(e)}
@@ -159,6 +170,16 @@ class ExperimentManager:
             response.raise_for_status()
             return response.json()
 
+        except requests.exceptions.HTTPError as e:
+            detail = None
+            try:
+                if e.response is not None:
+                    detail = (e.response.json() or {}).get("detail")
+            except Exception:
+                detail = None
+            msg = detail or str(e)
+            logger.error(f"Failed to stop experiment {experiment_id}: {msg}")
+            return {"error": msg}
         except requests.RequestException as e:
             logger.error(f"Failed to stop experiment {experiment_id}: {e}")
             return {"error": str(e)}
@@ -181,6 +202,26 @@ class ExperimentManager:
 
         except requests.RequestException as e:
             logger.error(f"Failed to create prompt experiment: {e}")
+            return {"error": str(e)}
+
+    def create_chain_experiment(self, chain_experiment_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new chain reasoning evolution experiment.
+
+        Args:
+            chain_experiment_data: Chain experiment data matching ChainExperimentCreate schema
+
+        Returns:
+            Dictionary containing created experiment details or error
+        """
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/v1/experiments/chains", json=chain_experiment_data, timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to create chain experiment: {e}")
             return {"error": str(e)}
 
     def drop_all_experiments(self) -> Dict[str, Any]:

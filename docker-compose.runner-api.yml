@@ -13,8 +13,8 @@ services:
       - STORAGE__SECRET_KEY=minioadmin
       - GIGAVOLVE__REDIS_URL=redis://redis-gigavolve:6379/0
       - KAFKA__BOOTSTRAP_SERVERS=kafka:9092
-      - WORKER__AUTOSTART=true
       - EXTRAS__PROMPT_LAYOUT_SOURCE=/host/gigaevo-core-internal/gigaevo/problems/prompt_layout.py
+      - GIGAVOLVE__CLONE_PATH=/tmp/gigavolve/gigaevo-core
     ports:
       - "8001:8001"
     depends_on:

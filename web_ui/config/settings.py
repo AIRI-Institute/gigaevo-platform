@@ -52,7 +52,8 @@ CLASSIFICATION_TARGET_EXAMPLES = ["label", "target", "species", "churn"]
 REGRESSION_TARGET_EXAMPLES = ["price", "age", "income", "target"]
 
 
-# Task types
+# Task types (UI-level). Internal variants like *_automl or *_catboost
+# are derived from this selection plus the model dropdown.
 TASK_TYPES = ["classification", "regression", "clustering"]
 
 # File upload configuration

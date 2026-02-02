@@ -6,6 +6,7 @@ from typing import Any, Dict
 import psutil
 from loguru import logger
 
+from common.version import __version__
 from ..models.experiment import ExperimentStatus
 from ..models.instance import RunnerInstanceStatus
 
@@ -102,7 +103,7 @@ class StatusService:
             return {
                 "status": overall_status,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "version": "0.1.0",
+                "version": __version__,
                 "uptime_seconds": int((datetime.now(timezone.utc) - self.start_time).total_seconds()),
                 "components": components,
             }
@@ -112,7 +113,7 @@ class StatusService:
             return {
                 "status": "error",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "version": "0.1.0",
+                "version": __version__,
                 "error": str(e),
                 "components": {},
             }
@@ -130,9 +131,15 @@ class StatusService:
             status_counts = {
                 "total": len(experiments),
                 "pending": 0,
+                "queued": 0,
+                "dispatching": 0,
+                "preparing": 0,
+                "prepared": 0,
+                "initializing": 0,
                 "running": 0,
                 "completed": 0,
                 "failed": 0,
+                "preparation_failed": 0,
                 "stopped": 0,
             }
 
@@ -141,7 +148,8 @@ class StatusService:
                 if status in status_counts:
                     status_counts[status] += 1
                 else:
-                    status_counts["failed"] += 1  # Count unknown statuses as failed
+                    # Unknown statuses: count as failed for visibility but keep distinct bucket too
+                    status_counts["failed"] += 1
 
             # Add recent experiments (last 5)
             recent_experiments = []
@@ -153,6 +161,8 @@ class StatusService:
                         "status": exp.status,
                         "created_at": exp.created_at.isoformat() if exp.created_at else None,
                         "progress": exp.metrics.get("progress", 0) if exp.metrics else 0,
+                        "status_message": getattr(exp, "status_message", None),
+                        "error_message": exp.error_message,
                     }
                 )
 
@@ -181,14 +191,23 @@ class StatusService:
                 "busy": 0,
                 "ready": 0,
                 "error": 0,
+                "initializing": 0,
+                "terminating": 0,
             }
 
             instance_details = []
             for instance in instances:
+                if instance.status.value not in status_counts:
+                    status_counts[instance.status.value] = 0
                 status_counts[instance.status.value] += 1
 
                 # Convert online/offline counts based on status
-                if instance.status in [RunnerInstanceStatus.READY, RunnerInstanceStatus.BUSY]:
+                if instance.status in [
+                    RunnerInstanceStatus.READY,
+                    RunnerInstanceStatus.BUSY,
+                    RunnerInstanceStatus.ONLINE,
+                    RunnerInstanceStatus.INITIALIZING,
+                ]:
                     status_counts["online"] += 1
                 elif instance.status == RunnerInstanceStatus.OFFLINE:
                     status_counts["offline"] += 1
@@ -235,7 +254,13 @@ class StatusService:
                         1 for exp in experiments if exp.status == ExperimentStatus.RUNNING
                     )
                     experiments_metrics["queued"] = sum(
-                        1 for exp in experiments if exp.status == ExperimentStatus.PENDING
+                        1
+                        for exp in experiments
+                        if exp.status
+                        in [
+                            ExperimentStatus.QUEUED.value,
+                            ExperimentStatus.DISPATCHING.value,
+                        ]
                     )
                 except Exception as e:
                     logger.debug(f"Could not get experiment metrics: {e}")

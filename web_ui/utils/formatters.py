@@ -36,16 +36,20 @@ def format_experiments_table(experiments: List[Dict[str, Any]]) -> pd.DataFrame:
         Formatted DataFrame
     """
     if not experiments:
-        return pd.DataFrame(columns=["ID", "Name", "Status", "Created", "Progress"])
+        return pd.DataFrame(columns=["ID", "Name", "Status", "Status Message", "Created", "Progress"])
 
     data = []
     for exp in experiments:
         progress = exp.get("metrics", {}).get("progress", 0)
+        status_msg = exp.get("status_message") or ""
+        if not status_msg and str(exp.get("status") or "").lower() == "preparation_failed":
+            status_msg = exp.get("error_message") or ""
         data.append(
             {
                 "ID": str(exp["id"]),
                 "Name": exp["name"],
                 "Status": exp["status"],
+                "Status Message": status_msg,
                 "Created": exp["created_at"][:19] if exp["created_at"] else "N/A",
                 "Progress": f"{progress:.1f}%",
             }
@@ -119,6 +123,7 @@ def format_experiment_details(experiment: Dict[str, Any]) -> Tuple[str, str]:
     Returns:
         Tuple of (details_text, metrics_text)
     """
+    config = experiment.get("config", {})
     details = f"""
     **Experiment Details**
 
@@ -127,15 +132,35 @@ def format_experiment_details(experiment: Dict[str, Any]) -> Tuple[str, str]:
     **Created:** {experiment["created_at"][:19] if experiment["created_at"] else "N/A"}
 
     **Configuration:**
-    - LLM Model: {experiment["config"]["llm_model"]}
-    - Max Iterations: {experiment["config"]["max_iterations"]}
-    - Timeout: {experiment["config"]["timeout_seconds"]}s
-
-    **Data Path:** {experiment["data_path"]}
+    - LLM Model: {config.get("llm_model", "N/A")}
+    - Max Iterations: {config.get("max_iterations", "N/A")}
+    - Timeout: {config.get("timeout_seconds", "N/A")}s
     """
 
+    # Add dataset configuration if available
+    dataset_size = config.get("dataset_size")
+    test_size = config.get("test_size")
+    if dataset_size is not None or test_size is not None:
+        details += "\n    **Dataset Configuration:**\n"
+        if dataset_size is not None:
+            details += f"    - Dataset Size: {dataset_size:,} rows\n"
+        if test_size is not None:
+            test_size_pct = test_size * 100
+            train_size_pct = (1.0 - test_size) * 100
+            details += f"    - Test Size: {test_size} ({test_size_pct:.1f}%)\n"
+
+            # Calculate train/test split if dataset_size is available
+            if dataset_size is not None:
+                train_rows = int(dataset_size * (1.0 - test_size))
+                test_rows = int(dataset_size * test_size)
+                details += f"    - **Train/Test Split:**\n"
+                details += f"      - Train: {train_rows:,} rows ({train_size_pct:.1f}%)\n"
+                details += f"      - Test: {test_rows:,} rows ({test_size_pct:.1f}%)\n"
+
+    details += f"\n    **Data Path:** {experiment.get('data_path', 'N/A')}"
+
     if experiment.get("error_message"):
-        details += f"\n**Error:** {experiment['error_message']}"
+        details += f"\n\n    **Error:** {experiment['error_message']}"
 
     metrics = experiment.get("metrics", {})
     metrics_text = json.dumps(metrics, indent=2) if metrics else "No metrics available"

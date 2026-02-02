@@ -14,6 +14,11 @@ uv.lock
 .env
 llm_models.yml
 
+# Generated runner pool compose overrides
+docker-compose.runner-pool.generated.yml
+docker-compose.runner-pool.dev.generated.yml
+docker-compose.runner-pool.*.generated.yml
+
 .aider*
 .DS_store
 .ruff_cache

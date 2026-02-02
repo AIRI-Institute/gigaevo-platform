@@ -9,6 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from common.version import __version__
 from src.api.routes import experiments, tasks, workers
 from src.config import load_config
 from src.services.experiment_service import ExperimentService
@@ -24,12 +25,13 @@ gigavolve_service = None
 _background_worker_task = None
 _background_worker: TaskWorker | None = None
 _results_collection_task = None
+_repo_clone_task = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
-    global gigavolve_service, _background_worker_task, _background_worker, _results_collection_task
+    global gigavolve_service, _background_worker_task, _background_worker, _results_collection_task, _repo_clone_task
     # Startup
     logger.info("Starting GigaEvo Platform Runner API...")
 
@@ -38,51 +40,24 @@ async def lifespan(app: FastAPI):
 
     cfg = load_config()
 
-    # Clone the repository on startup
-    logger.info("Cloning GigaEvolve repository...")
-    clone_success = await gigavolve_service.clone_repository(force_refresh=cfg.gigavolve.repo_force_refresh)
-
-    if clone_success:
-        repo_info = await gigavolve_service.get_repository_info()
-        logger.info(f"GigaEvolve repository ready: {repo_info}")
-        # Ensure prompt_layout.py exists inside cloned repo
-        # This is handled by _ensure_prompt_layout_file in GigaEvolveService.clone_repository()
-        # which copies from master_api/src/folder_constructor/prompt_layout.py
-        # Additional check here is redundant but kept for backward compatibility
+    # Clone the repository in background so API becomes healthy fast.
+    # /health reports repository readiness separately.
+    async def _clone_repo_background():
         try:
-            from pathlib import Path as _Path
-
-            # Use configured source or default to master_api location
-            # In Docker: /app/master_api/src/folder_constructor/prompt_layout.py
-            default_paths = [
-                "/app/master_api/src/folder_constructor/prompt_layout.py",  # Docker path
-            ]
-            src_path = cfg.extras.prompt_layout_source
-            if not src_path:
-                # Try default paths in order
-                for path in default_paths:
-                    if _Path(path).exists():
-                        src_path = path
-                        break
-                if not src_path:
-                    src_path = default_paths[1]  # Fallback to local dev path
-            logger.info(f"Checking prompt_layout_source: {src_path}")
-            sp = _Path(src_path)
-            logger.info(f"Source path exists: {sp.exists()}, path: {src_path}")
-            if sp.exists():
-                # Copy to gigaevo/problems/prompt_layout.py (like custom llm config)
-                dest = _Path(cfg.gigavolve.clone_path) / "gigaevo" / "problems" / "prompt_layout.py"
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                import shutil as _shutil
-
-                _shutil.copyfile(str(sp), str(dest))
-                logger.info(f"Copied prompt_layout.py from {src_path} to {dest}")
+            logger.info("Cloning GigaEvolve repository (background)...")
+            clone_success = await gigavolve_service.clone_repository(force_refresh=cfg.gigavolve.repo_force_refresh)
+            if clone_success:
+                repo_info = await gigavolve_service.get_repository_info()
+                logger.info(f"GigaEvolve repository ready: {repo_info}")
             else:
-                logger.warning(f"prompt_layout_source not found: {src_path}")
-        except Exception as _e:
-            logger.error(f"Failed to ensure prompt_layout.py in cloned repo: {_e}", exc_info=True)
-    else:
-        logger.error("Failed to clone GigaEvolve repository")
+                logger.error("Failed to clone GigaEvolve repository")
+        except Exception as e:
+            logger.error(f"Background repo clone failed: {e}")
+
+    try:
+        _repo_clone_task = asyncio.create_task(_clone_repo_background())
+    except Exception as e:
+        logger.warning(f"Failed to start background repo clone task: {e}")
 
     # Initialize ExperimentService (singleton) and register in routes
     logger.info("Initializing ExperimentService (singleton)")
@@ -96,17 +71,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("GigaEvo Platform Runner API startup complete")
 
-    # Optionally start a default background worker
+    # Start background worker
     try:
-        if cfg.worker.autostart:
-            _background_worker = TaskWorker(
-                worker_id=cfg.worker.autostart_worker_id,
-                name=cfg.worker.autostart_worker_name,
-            )
-            _background_worker_task = asyncio.create_task(_background_worker.start())
-            logger.info(
-                f"Started background TaskWorker id={cfg.worker.autostart_worker_id} name={cfg.worker.autostart_worker_name}"
-            )
+        _background_worker = TaskWorker(
+            worker_id=cfg.worker.worker_id,
+            name="background-worker",
+        )
+        _background_worker_task = asyncio.create_task(_background_worker.start())
+        logger.info(f"Started background TaskWorker id={cfg.worker.worker_id}")
     except Exception as e:
         logger.warning(f"Failed to start background worker: {e}")
 
@@ -201,6 +173,12 @@ async def lifespan(app: FastAPI):
                 await _results_collection_task
             except asyncio.CancelledError:
                 pass
+        if _repo_clone_task:
+            _repo_clone_task.cancel()
+            try:
+                await _repo_clone_task
+            except asyncio.CancelledError:
+                pass
     except Exception as e:
         logger.warning(f"Failed to stop background worker: {e}")
 
@@ -208,7 +186,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="GigaEvo Platform Runner API",
     description="Runner API for executing experiments and managing workers",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -230,18 +208,18 @@ async def health_check():
     """Health check endpoint"""
     global gigavolve_service
 
-    health_status = {"status": "healthy", "service": "GigaEvo Platform Runner API", "version": "0.1.0"}
+    health_status = {"status": "healthy", "service": "GigaEvo Platform Runner API", "version": "unknown"}
 
     # Check GigaEvolve repository status
     if gigavolve_service:
         repo_ready = gigavolve_service.is_repository_ready()
-        health_status["gigavolve_repository"] = {"ready": repo_ready, "path": gigavolve_service.config.clone_path}
+        health_status["dependencies"] = {"installed": repo_ready}
 
         if repo_ready:
             repo_info = await gigavolve_service.get_repository_info()
-            health_status["gigavolve_repository"].update(repo_info)
+            health_status["version"] = repo_info.get("tag") or repo_info.get("commit_hash", "unknown")
     else:
-        health_status["gigavolve_repository"] = {"ready": False, "error": "Service not initialized"}
+        health_status["dependencies"] = {"installed": False, "error": "Service not initialized"}
 
     return health_status
 

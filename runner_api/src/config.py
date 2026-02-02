@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
 import os
+import socket
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,9 +24,7 @@ class WorkerConfig(BaseModel):
     max_workers: int = 3
     worker_timeout: int = 3600
     polling_interval: int = 5
-    autostart: bool = False
-    autostart_worker_id: str = "dev-worker-1"
-    autostart_worker_name: str = "dev-local-1"
+    worker_id: str = Field(default_factory=lambda: f"runner-api-{socket.gethostname()}-{os.getpid()}")
 
 
 class GigaEvolveConfig(BaseModel):
@@ -44,7 +43,7 @@ class GigaEvolveConfig(BaseModel):
 
 
 class ExtrasConfig(BaseModel):
-    """Optional extra paths/hooks"""
+    """Optional extra paths/hooks."""
 
     # Absolute path to prompt_layout.py to copy into cloned repo if missing
     prompt_layout_source: Optional[str] = None
@@ -67,6 +66,7 @@ class Config(BaseSettings):
 
     # Extras
     extras: ExtrasConfig = ExtrasConfig()
+
     # Runner API
     host: str = "0.0.0.0"
     port: int = 8001

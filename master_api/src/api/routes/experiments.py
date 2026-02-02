@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import re
 import tempfile
@@ -7,11 +8,18 @@ from typing import Any, Dict, List
 
 import aiofiles
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 from common.llm_registry import get_allowed_llm_model_ids, is_allowed_llm_model
 
-from ...models.experiment import Experiment, ExperimentConfig, ExperimentCreate, PromptExperimentCreate
+from ...models.experiment import (
+    Experiment,
+    ExperimentConfig,
+    ExperimentCreate,
+    PromptExperimentCreate,
+    ChainExperimentCreate,
+)
 from ...services.experiment_service import ExperimentService
 from ...services.service_manager import ServiceManager
 
@@ -88,19 +96,6 @@ async def upload_data_file(
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 
-@router.post("/{experiment_id}/deploy")
-async def deploy_experiment(
-    experiment_id: str,
-    runner_id: str | None = None,
-    service: ExperimentService = Depends(get_experiment_service),
-):
-    """Manually deploy experiment to runner"""
-    success = await service.manually_deploy_experiment(experiment_id, runner_id)
-    if not success:
-        raise HTTPException(status_code=400, detail="Cannot deploy experiment")
-    return {"message": "Experiment deployed", "experiment_id": experiment_id}
-
-
 @router.get("/", response_model=List[Experiment])
 async def list_experiments(
     service: ExperimentService = Depends(get_experiment_service),
@@ -121,10 +116,10 @@ async def get_experiment_status(experiment_id: str, service: ExperimentService =
 @router.post("/{experiment_id}/start")
 async def start_experiment(experiment_id: str, service: ExperimentService = Depends(get_experiment_service)):
     """Start experiment"""
-    success, error_message = await service.start_experiment_forward(experiment_id)
-    if not success:
-        raise HTTPException(status_code=400, detail=f"ERROR: {error_message}")
-    return {"message": "Experiment started", "experiment_id": experiment_id}
+    res = await service.start_experiment_forward(experiment_id)
+    if not res.ok:
+        raise HTTPException(status_code=res.http_status, detail=f"ERROR: {res.detail or 'Failed to start'}")
+    return JSONResponse(status_code=res.http_status, content=res.payload or {})
 
 
 @router.post("/{experiment_id}/stop")
@@ -200,6 +195,8 @@ async def create_prompt_experiment(
             llm_model=prompt_experiment.llm_model,
             prompt_llm_model=getattr(prompt_experiment, "prompt_llm_model", None),
             max_iterations=prompt_experiment.max_iterations,
+            dataset_size=prompt_experiment.dataset_size,
+            test_size=prompt_experiment.test_size,
         )
         experiment_create = ExperimentCreate(
             name=prompt_experiment.name,
@@ -232,6 +229,8 @@ async def create_prompt_experiment(
                     "llm_model": prompt_experiment.llm_model,
                     "prompt_llm_model": getattr(prompt_experiment, "prompt_llm_model", None),
                     "max_iterations": prompt_experiment.max_iterations,
+                    "dataset_size": prompt_experiment.dataset_size,
+                    "test_size": prompt_experiment.test_size,
                 }
                 await creation.create_prompt_experiment_files(experiment_id, prompt_spec, prompt_experiment.data_path)
         except Exception as e:
@@ -249,6 +248,114 @@ async def create_prompt_experiment(
     except Exception as e:
         logger.error(f"Error creating prompt experiment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create prompt experiment: {str(e)}")
+
+
+@router.post("/chains", response_model=Experiment)
+async def create_chain_experiment(
+    chain_experiment: ChainExperimentCreate,
+    service: ExperimentService = Depends(get_experiment_service),
+):
+    try:
+        logger.info(f"Received chain experiment creation request: {chain_experiment.name}")
+        if chain_experiment.llm_model and not is_allowed_llm_model(chain_experiment.llm_model):
+            allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported llm_model '{chain_experiment.llm_model}'. Allowed: {allowed}",
+            )
+
+        try:
+            chain_config = json.loads(chain_experiment.base_chain_config)
+            if "steps" not in chain_config or not isinstance(chain_config["steps"], list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Chain config must contain a 'steps' array with at least one step",
+                )
+            if len(chain_config["steps"]) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Chain config must contain at least one step",
+                )
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid JSON in base_chain_config: {str(e)}",
+            )
+
+        vc_dict: Dict[str, Any] = {}
+        try:
+            if getattr(chain_experiment, "validation_criteria", None) is not None:
+                vc = chain_experiment.validation_criteria
+                vc_dict = vc.dict() if hasattr(vc, "dict") else vc.model_dump()  # type: ignore[attr-defined]
+        except Exception:
+            vc_dict = {}
+
+        timeout_seconds = getattr(chain_experiment, "timeout_seconds", None)
+        if timeout_seconds is None:
+            timeout_seconds = max(3600, int(chain_experiment.max_iterations * 90 * 1.3))
+        
+        config = ExperimentConfig(
+            description=chain_experiment.description or "",
+            parameters={
+                "target_column": chain_experiment.target_column,
+                "base_chain_config": chain_experiment.base_chain_config,
+                "validation_criteria": vc_dict,
+            },
+            llm_model=chain_experiment.llm_model,
+            max_iterations=chain_experiment.max_iterations,
+            timeout_seconds=timeout_seconds,
+            dataset_size=chain_experiment.dataset_size,
+            test_size=chain_experiment.test_size,
+        )
+        experiment_create = ExperimentCreate(
+            name=chain_experiment.name,
+            config=config,
+            data_path=chain_experiment.data_path,
+        )
+
+        global _service_manager
+        if not _service_manager:
+            raise HTTPException(status_code=503, detail="Service manager not initialized")
+        db = _service_manager.get_db_service()
+        from uuid import uuid4
+
+        experiment_id = f"exp_{uuid4()}"
+        await db.create_experiment(experiment_create, experiment_id)
+
+        try:
+            if _service_manager and hasattr(_service_manager, "creation_service"):
+                creation = _service_manager.creation_service
+                if creation is None:
+                    raise Exception("Experiment Creation service is not initialized!")
+                chain_spec: Dict[str, Any] = {
+                    "name": chain_experiment.name,
+                    "description": chain_experiment.description or "",
+                    "data_path": chain_experiment.data_path,
+                    "target_column": chain_experiment.target_column,
+                    "base_chain_config": chain_experiment.base_chain_config,
+                    "validation_criteria": vc_dict,
+                    "llm_model": chain_experiment.llm_model,
+                    "max_iterations": chain_experiment.max_iterations,
+                    "timeout_seconds": timeout_seconds,
+                    "dataset_size": chain_experiment.dataset_size,
+                    "test_size": chain_experiment.test_size,
+                    "evolution_mode": getattr(chain_experiment, "evolution_mode", "full_chain") or "full_chain",
+                    "step_number": getattr(chain_experiment, "step_number", None),
+                }
+                await creation.create_chain_experiment_files(experiment_id, chain_spec, chain_experiment.data_path)
+        except Exception as e:
+            logger.error(f"Failed to prepare chain experiment files for {experiment_id}: {e}")
+
+        created = await service.get_experiment(experiment_id)
+        if not created:
+            raise HTTPException(status_code=500, detail="Experiment created but not found")
+        return created
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating chain experiment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create chain experiment: {str(e)}")
 
 
 @router.delete("/drop-all", response_model=Dict[str, Any])

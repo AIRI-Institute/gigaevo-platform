@@ -1,0 +1,86 @@
+TASK DEFINITION – CARL CHAIN STEP EVOLUTION
+
+Problem Type: Evolutionary CARL Chain Step Design
+Challenge: Design and optimize a single step in a CARL reasoning chain that generates high-quality solutions for the given task.
+
+OBJECTIVE:
+Implement and iteratively improve a JSON configuration for step ${step_number} in a CARL reasoning chain.
+You must evolve ONLY the specified step while keeping all other steps fixed.
+
+- Output of the program: A CARL chain configuration stored in CHAIN_CONFIG_JSON, executed by the helper module.
+- Fitness: Accuracy of predicted answers on the evaluation dataset.
+- Goal: Maximize the measured Accuracy.
+
+INPUT–OUTPUT CONTEXT:
+- Input: Each data sample has fields from the dataset.
+- Output: The final answer extracted from the CARL chain's output.
+
+CONSTRAINTS:
+- You MUST keep the `entrypoint` function signature and return format unchanged.
+- You MUST define a single variable `CHAIN_CONFIG_JSON: str` inside the evolve block.
+- `CHAIN_CONFIG_JSON` MUST contain valid JSON describing the CARL chain with ALL steps.
+- You MUST evolve ONLY step ${step_number} (${target_step_info}). All other steps MUST remain exactly as in the base configuration.
+- The evolved step MUST maintain the same step number (${step_number}).
+
+BASE CHAIN CONFIGURATION:
+The base chain configuration contains ${num_steps} steps:
+${step_titles}
+
+TARGET STEP TO EVOLVE:
+Step ${step_number}: ${target_step_info}
+
+Current step configuration:
+${target_step_json}
+
+You must evolve ONLY this step. The step must:
+- Keep the same step number: ${step_number}
+- Maintain dependencies (if any) to ensure proper execution order
+- Improve the step's effectiveness while keeping other steps unchanged
+
+REQUIRED FIELDS FOR THE EVOLVED STEP:
+  
+  * "number" (REQUIRED, int): MUST be ${step_number} (cannot be changed)
+  
+  * "title" (REQUIRED, str): Short descriptive name for the step. Can be improved.
+  
+  * "aim" (REQUIRED, str): Clear statement of what this step should accomplish. Can be refined.
+  
+  * "reasoning_questions" (REQUIRED, str): Questions that guide the LLM's reasoning process. Can be improved.
+  
+  * "dependencies" (REQUIRED, list): List of step numbers that must be completed before this step. MUST match the base configuration.
+  
+  * "step_context_queries" (REQUIRED, list): List of strings specifying what context information should be retrieved. Can be optimized.
+  
+  * "stage_action" (REQUIRED, str): Detailed description of the action to be performed. Can be enhanced.
+  
+  * "example_reasoning" (REQUIRED, str): Example or template of how reasoning should proceed. Can be improved.
+
+IMPORTANT:
+- All other steps (1 through ${num_steps}, except step ${step_number}) MUST remain EXACTLY as in the base configuration.
+- Only step ${step_number} should be modified/evolved.
+- The step number ${step_number} MUST NOT be changed.
+- Dependencies of step ${step_number} MUST remain the same as in the base configuration.
+
+FAILURE MODES:
+- Invalid JSON (not parseable).
+- Missing required fields for the evolved step.
+- Changing step numbers or other steps.
+- Modified dependencies that break the execution order.
+- Reasoning chain that does not lead to correct answers.
+
+EVALUATION FRAMEWORK:
+- Performance is evaluated by accuracy and auxiliary metrics.
+- Fitness = Accuracy on the train split; val_fitness = Accuracy on the validation split.
+- Higher fitness → better step configuration.
+
+OUTPUT FORMAT:
+
+The entrypoint function is FIXED and must NOT be changed.
+The entrypoint only returns the chain configuration - execution happens in validate.py.
+
+
+CHAIN_CONFIG_JSON: str = """<your JSON chain config here with all steps, but only step ${step_number} evolved>""".strip()
+
+
+def entrypoint(context):
+    return {"chain_config_json": CHAIN_CONFIG_JSON}

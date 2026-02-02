@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 
 import uuid
+from datetime import datetime, timedelta
 from typing import List, Optional
 from uuid import uuid4
 
 from loguru import logger
+from sqlalchemy import text
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ..config import load_config
 from ..models.database import Base, ExperimentModel, FileUploadModel, RunnerInstanceModel, TaskModel
 from ..models.experiment import ExperimentCreate, ExperimentStatus
+from ..models.instance import RunnerInstanceStatus
 
 
 class DatabaseService:
@@ -20,6 +23,33 @@ class DatabaseService:
         self.config = config or load_config()
         self.engine = None
         self.session_factory = None
+
+    async def _ensure_columns_exist(self, conn):
+        """Ensure all required columns exist in tables (for schema migrations)"""
+        try:
+            # Check and add missing columns for experiments table
+            experiments_columns = {
+                "status_message": "TEXT",
+            }
+            
+            for column_name, column_type in experiments_columns.items():
+                # Check if column exists
+                check_query = text(
+                    """
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'experiments' AND column_name = :column_name
+                    """
+                )
+                result = await conn.execute(check_query, {"column_name": column_name})
+                row = result.fetchone()
+                if not row:
+                    # Column doesn't exist, add it
+                    alter_query = text(f"ALTER TABLE experiments ADD COLUMN {column_name} {column_type}")
+                    await conn.execute(alter_query)
+                    logger.info(f"Added missing column '{column_name}' to experiments table")
+        except Exception as e:
+            logger.warning(f"Failed to ensure columns exist (non-critical): {e}")
 
     async def initialize(self):
         """Initialize database connection and create tables"""
@@ -44,6 +74,10 @@ class DatabaseService:
             # Create tables
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                
+                # Ensure missing columns are added (for existing databases)
+                if not self.config.database.url.startswith("sqlite"):
+                    await self._ensure_columns_exist(conn)
 
             logger.info("Database initialized successfully")
 
@@ -177,6 +211,216 @@ class DatabaseService:
 
             result = await session.execute(query)
             return result.scalars().all()
+
+    async def has_ready_runner_capacity(self) -> bool:
+        """
+        Return True if there is at least one READY runner with no current experiment.
+
+        Used by the queue scheduler to avoid flipping experiments into DISPATCHING
+        when we already know there is no capacity (better UX).
+        """
+        async with await self.get_session() as session:
+            try:
+                q = (
+                    select(RunnerInstanceModel.id)
+                    .where(
+                        RunnerInstanceModel.status == RunnerInstanceStatus.READY.value,
+                        RunnerInstanceModel.current_experiment_id.is_(None),
+                    )
+                    .limit(1)
+                )
+                res = await session.execute(q)
+                return res.scalar_one_or_none() is not None
+            except Exception:
+                return False
+
+    async def allocate_runner_for_experiment(self, experiment_id: str) -> Optional[RunnerInstanceModel]:
+        """
+        Atomically allocate a READY runner for an experiment (binary capacity).
+
+        - Select one READY runner (no current experiment)
+        - Mark it BUSY and set current_experiment_id
+        - Persist assigned_runner_id in experiment.config
+        """
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    # Lock one READY runner row to prevent concurrent allocation
+                    q = (
+                        select(RunnerInstanceModel)
+                        .where(
+                            RunnerInstanceModel.status == RunnerInstanceStatus.READY.value,
+                            RunnerInstanceModel.current_experiment_id.is_(None),
+                        )
+                        .with_for_update(skip_locked=True)
+                        .limit(1)
+                    )
+                    res = await session.execute(q)
+                    runner = res.scalar_one_or_none()
+                    if not runner:
+                        return None
+
+                    runner.status = RunnerInstanceStatus.BUSY.value
+                    runner.current_experiment_id = experiment_id
+                    runner.last_heartbeat = datetime.utcnow()
+
+                    exp = await session.get(ExperimentModel, experiment_id)
+                    if exp:
+                        cfg = dict(exp.config or {})
+                        cfg["assigned_runner_id"] = runner.id
+                        exp.config = cfg
+                        exp.updated_at = datetime.utcnow()
+
+                # Refresh outside transaction to return up-to-date row
+                await session.refresh(runner)
+                return runner
+            except Exception as e:
+                logger.error(f"Failed to allocate runner for experiment {experiment_id}: {e}")
+                await session.rollback()
+                return None
+
+    async def allocate_specific_runner_for_experiment(
+        self, runner_id: str, experiment_id: str
+    ) -> Optional[RunnerInstanceModel]:
+        """Allocate a specific runner if it is READY; otherwise return None."""
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    runner = await session.get(RunnerInstanceModel, runner_id, with_for_update=True)
+                    if not runner:
+                        return None
+                    if runner.status != RunnerInstanceStatus.READY.value or runner.current_experiment_id is not None:
+                        return None
+                    runner.status = RunnerInstanceStatus.BUSY.value
+                    runner.current_experiment_id = experiment_id
+                    runner.last_heartbeat = datetime.utcnow()
+
+                    exp = await session.get(ExperimentModel, experiment_id)
+                    if exp:
+                        cfg = dict(exp.config or {})
+                        cfg["assigned_runner_id"] = runner.id
+                        exp.config = cfg
+                        exp.updated_at = datetime.utcnow()
+
+                await session.refresh(runner)
+                return runner
+            except Exception as e:
+                logger.error(f"Failed to allocate runner {runner_id} for experiment {experiment_id}: {e}")
+                await session.rollback()
+                return None
+
+    async def release_runner_if_assigned(self, experiment_id: str) -> bool:
+        """
+        Release whichever runner is currently BUSY with this experiment_id.
+        Safe/idempotent: only releases if runner.current_experiment_id matches.
+        """
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    q = (
+                        select(RunnerInstanceModel)
+                        .where(RunnerInstanceModel.current_experiment_id == experiment_id)
+                        .with_for_update()
+                    )
+                    res = await session.execute(q)
+                    runner = res.scalar_one_or_none()
+                    if not runner:
+                        return False
+                    runner.status = RunnerInstanceStatus.READY.value
+                    runner.current_experiment_id = None
+                    runner.last_heartbeat = datetime.utcnow()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to release runner for experiment {experiment_id}: {e}")
+                await session.rollback()
+                return False
+
+    async def release_runner_by_id_if_experiment(self, runner_id: str, experiment_id: str) -> bool:
+        """Release a specific runner if it is still assigned to the given experiment."""
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    runner = await session.get(RunnerInstanceModel, runner_id, with_for_update=True)
+                    if not runner:
+                        return False
+                    if runner.current_experiment_id != experiment_id:
+                        return False
+                    runner.status = RunnerInstanceStatus.READY.value
+                    runner.current_experiment_id = None
+                    runner.last_heartbeat = datetime.utcnow()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to release runner {runner_id} for experiment {experiment_id}: {e}")
+                await session.rollback()
+                return False
+
+    async def set_runner_ready(self, runner_id: str) -> bool:
+        """Force runner to READY (used for reconciliation of inconsistent states)."""
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    runner = await session.get(RunnerInstanceModel, runner_id, with_for_update=True)
+                    if not runner:
+                        return False
+                    runner.status = RunnerInstanceStatus.READY.value
+                    runner.current_experiment_id = None
+                    runner.last_heartbeat = datetime.utcnow()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to set runner {runner_id} READY: {e}")
+                await session.rollback()
+                return False
+
+    async def claim_next_queued_for_dispatching(self) -> Optional[ExperimentModel]:
+        """Atomically claim the oldest queued experiment by moving it to DISPATCHING."""
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    q = (
+                        select(ExperimentModel)
+                        .where(ExperimentModel.status == ExperimentStatus.QUEUED.value)
+                        .order_by(ExperimentModel.created_at.asc())
+                        .with_for_update(skip_locked=True)
+                        .limit(1)
+                    )
+                    res = await session.execute(q)
+                    exp = res.scalar_one_or_none()
+                    if not exp:
+                        return None
+                    exp.status = ExperimentStatus.DISPATCHING.value
+                    exp.status_message = "Dispatching to runner..."
+                    exp.updated_at = datetime.utcnow()
+                await session.refresh(exp)
+                return exp
+            except Exception as e:
+                logger.error(f"Failed to claim queued experiment: {e}")
+                await session.rollback()
+                return None
+
+    async def recover_stale_dispatching(self, ttl_seconds: int = 60) -> int:
+        """Revert stale dispatching experiments back to queued (best-effort)."""
+        ttl_seconds = max(10, int(ttl_seconds or 60))
+        threshold = datetime.utcnow() - timedelta(seconds=ttl_seconds)
+        async with await self.get_session() as session:
+            try:
+                async with session.begin():
+                    stmt = (
+                        update(ExperimentModel)
+                        .where(
+                            ExperimentModel.status == ExperimentStatus.DISPATCHING.value,
+                            ExperimentModel.updated_at < threshold,
+                        )
+                        .values(
+                            status=ExperimentStatus.QUEUED.value,
+                            status_message="Retrying dispatch (previous attempt timed out)",
+                        )
+                    )
+                    res = await session.execute(stmt)
+                return int(res.rowcount or 0)
+            except Exception as e:
+                logger.debug(f"Stale dispatching recovery skipped/failed: {e}")
+                await session.rollback()
+                return 0
 
     # Task operations
     async def create_task(self, experiment_id: str, task_type: str) -> TaskModel:

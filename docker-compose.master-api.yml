@@ -12,7 +12,11 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - KAFKA__ENABLED=true
       - KAFKA__BOOTSTRAP_SERVERS=kafka:9092
-      - RUNNER__BASE_URL=http://runner-api:8001
+      # Runner pool (always, even size=1)
+      - RUNNER__POOL_SIZE=${RUNNER_POOL_SIZE:-1}
+      - RUNNER__POOL_HOST_PREFIX=runner-api-
+      # Compose manages runner containers; Master monitors/allocates only
+      - RUNNER__MANAGE_CONTAINERS=false
     ports:
       - "8000:8000"
     depends_on:
@@ -29,6 +33,7 @@ services:
     volumes:
       - input_data:/app/input_data
       - ./llm_models.yml:/llm_models.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

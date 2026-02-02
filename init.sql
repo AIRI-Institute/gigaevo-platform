@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS experiments (
     completed_at TIMESTAMP WITH TIME ZONE,
     metrics JSONB DEFAULT '{}',
     best_result JSONB,
-    error_message TEXT
+    error_message TEXT,
+    status_message TEXT
 );
 
 -- Runner instances table

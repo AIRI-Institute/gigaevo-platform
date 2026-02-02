@@ -53,8 +53,6 @@ def load_llm_registry() -> Dict[str, Any]:
     return data
 
 
-
-
 def get_llm_model_entry(model_id: str) -> Dict[str, Any]:
     """Return the model entry dict for a given model id, or raise if missing."""
     reg = load_llm_registry()

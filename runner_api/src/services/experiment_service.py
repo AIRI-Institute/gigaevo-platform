@@ -477,6 +477,7 @@ class ExperimentService:
             failed_tasks = 0
             queued_tasks = 0
             running_tasks = 0
+            last_error_message: str = ""
 
             if total_tasks > 0:
                 # Fetch all task hashes in one round-trip
@@ -493,6 +494,8 @@ class ExperimentService:
                         completed_tasks += 1
                     elif task_status == TaskStatus.FAILED.value:
                         failed_tasks += 1
+                        if not last_error_message:
+                            last_error_message = task_data.get("error_message", "") or ""
                     elif task_status == TaskStatus.QUEUED.value:
                         queued_tasks += 1
                     elif task_status == TaskStatus.RUNNING.value:
@@ -512,6 +515,7 @@ class ExperimentService:
                 "workspace": status_data.get("workspace", ""),
                 "created_at": status_data.get("created_at", ""),
                 "started_at": status_data.get("started_at", ""),
+                "error_message": last_error_message or "",
                 "metrics": {
                     "progress_percentage": progress,
                     "task_completion_rate": completed_tasks / total_tasks if total_tasks > 0 else 0,

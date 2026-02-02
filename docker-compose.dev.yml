@@ -22,6 +22,7 @@ services:
   # Redis for task queue
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--databases", "${REDIS_DATABASES:-16}"]
     ports:
       - "6379:6379"
     volumes:
@@ -35,6 +36,7 @@ services:
   # Redis for GigaEvolve experiments
   redis-gigavolve:
     image: redis:7-alpine
+    command: ["redis-server", "--databases", "${REDIS_DATABASES:-16}"]
     ports:
       - "6380:6379"
     volumes:
@@ -156,7 +158,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - KAFKA__ENABLED=true
       - KAFKA__BOOTSTRAP_SERVERS=kafka:29092
-      - RUNNER__BASE_URL=http://runner-api:8001
+      # Runner pool (always, even size=1)
+      - RUNNER__POOL_SIZE=${RUNNER_POOL_SIZE:-1}
+      - RUNNER__POOL_HOST_PREFIX=runner-api-
+      - RUNNER__MANAGE_CONTAINERS=false
       - DEBUG=true
     ports:
       - "8000:8000"
@@ -174,6 +179,7 @@ services:
       - input_data:/app/input_data
       - ./llm_models.yml:/llm_models.yml:ro
       - ./common:/app/common:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     command:
       [
         "uv",
@@ -188,60 +194,6 @@ services:
       ]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Runner API (Development)
-  runner-api:
-    build:
-      context: .
-      dockerfile: runner_api/Dockerfile.dev
-    env_file:
-      - .env
-    environment:
-      - REDIS__URL=redis://redis:6379/0
-      - STORAGE__ENDPOINT_URL=http://minio:9000
-      - STORAGE__ACCESS_KEY=minioadmin
-      - STORAGE__SECRET_KEY=minioadmin
-      - GIGAVOLVE__REDIS_URL=redis://redis-gigavolve:6379/0
-      - DEBUG=true
-      - WORKER__AUTOSTART=true
-      - EXTRAS__PROMPT_LAYOUT_SOURCE=/app/master_api/src/folder_constructor/prompt_layout.py
-      - HOST_UID=${HOST_UID:-1000}
-      - HOST_GID=${HOST_GID:-1000}
-    ports:
-      - "8001:8001"
-    depends_on:
-      redis:
-        condition: service_healthy
-      redis-gigavolve:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    volumes:
-      - ./runner_api/src:/app/src
-      - ./runner_api/repos:/app/repos
-      - ./master_api/src:/app/master_api/src:ro
-      - input_data:/app/input_data
-      - ./llm_models.yml:/llm_models.yml:ro
-      - ./common:/app/common:ro
-    command:
-      [
-        "uv",
-        "run",
-        "uvicorn",
-        "src.main:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8001",
-        "--reload",
-        "--reload-dir",
-        "/app/src",
-      ]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3

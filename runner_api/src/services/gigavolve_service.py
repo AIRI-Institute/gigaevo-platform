@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import asyncio
+import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -12,16 +14,89 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from common.llm_registry import get_default_llm_model_id, get_default_prompt_llm_model_id, get_llm_runtime_required
+from redis.asyncio import Redis
 
 from ..config import load_config
 
 logger = logging.getLogger(__name__)
 
 
+def _extract_prompt_template(program_code: str) -> Optional[str]:
+    """Extract PROMPT_TEMPLATE content from program code.
+
+    Returns the extracted prompt template string, or None if extraction fails
+    (indicating this is not a prompt experiment).
+    """
+    if not program_code:
+        return None
+
+    # Match PROMPT_TEMPLATE: str = """...""" or PROMPT_TEMPLATE = """..."""
+    # Supports with/without type hint, triple/single quotes
+    pattern = re.compile(
+        r"PROMPT_TEMPLATE\s*(?::\s*str\s*)?=\s*(?P<q>\"\"\"|'''|\"|')(?P<body>.*?)(?P=q)",
+        re.DOTALL,
+    )
+    m = pattern.search(program_code)
+    if m:
+        # Unescape escaped triple quotes from baseline creation
+        body = m.group("body")
+        body = body.replace('\\"\\"\\"', '"""').replace("\\'\\'\\'", "'''")
+        return body
+    return None
+
+
 class GigaEvolveService:
     def __init__(self):
-        self.config = load_config().gigavolve
+        cfg = load_config()
+        self.config = cfg.gigavolve
+        self.extras = cfg.extras
         self._ensure_repos_directory()
+
+    def _ensure_prompt_layout_present(self, clone_path: Path) -> None:
+        """
+        Ensure gigaevo/problems/prompt_layout.py exists inside the checked-out repo.
+
+        If missing, we try to copy it from:
+        - extras.prompt_layout_source (EXTRAS__PROMPT_LAYOUT_SOURCE)
+        - /app/master_api/src/folder_constructor/prompt_layout.py (Docker)
+        - <repo_root>/master_api/src/folder_constructor/prompt_layout.py (local dev)
+        """
+        dest = clone_path / "gigaevo" / "problems" / "prompt_layout.py"
+        if dest.exists():
+            return
+
+        repo_root = Path(__file__).resolve().parents[3]
+        candidates = [
+            self.extras.prompt_layout_source,
+            "/app/master_api/src/folder_constructor/prompt_layout.py",
+            str(repo_root / "master_api" / "src" / "folder_constructor" / "prompt_layout.py"),
+        ]
+
+        src_path: Optional[str] = None
+        for c in candidates:
+            if not c:
+                continue
+            p = Path(c)
+            if p.exists():
+                src_path = c
+                break
+
+        if not src_path:
+            tried = ", ".join([str(c) for c in candidates if c])
+            raise FileNotFoundError(
+                f"Required prompt_layout.py is missing in repo (expected at {dest}) and no source was found. "
+                f"Tried: {tried}"
+            )
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src_path, dest)
+            logger.info("Copied prompt_layout.py from %s to %s", src_path, str(dest))
+        except Exception as e:
+            raise RuntimeError(f"Failed to copy prompt_layout.py from {src_path} to {dest}: {e}") from e
+
+        if not dest.exists():
+            raise RuntimeError(f"prompt_layout.py copy completed but file is still missing at {dest}")
 
     def _resolve_python_path(self, clone_path: Path) -> str:
         """Prefer repo-local venv python if present; otherwise fall back to configured python_path."""
@@ -60,20 +135,34 @@ class GigaEvolveService:
         candidate_url = (cfg.gigavolve.redis_url or cfg.redis.url or "").strip()
         return self._parse_redis_url(candidate_url)
 
-    def _ensure_llm_config_present(self, clone_path: Path, *, strict: bool, context: str) -> None:
-        """Ensure Hydra LLM config file exists for the repo; optionally raise on failure."""
+    def _patch_stage_timeout(self, clone_path: Path) -> None:
+        """Patch DEFAULT_STAGE_TIMEOUT and DEFAULT_DAG_TIMEOUT in constants.py to 3600."""
         try:
-            self._ensure_llm_config_file(clone_path)
-            cfg_path = clone_path / "config" / "llm" / "custom.yaml"
-            if cfg_path.exists():
-                logger.info(f"✓ LLM config ensured ({context}) at {cfg_path}")
+            constants_file = clone_path / "gigaevo" / "entrypoint" / "constants.py"
+            if not constants_file.exists():
+                logger.warning(f"constants.py not found at {constants_file}, skipping timeout patch")
+                return
+
+            content = constants_file.read_text(encoding="utf-8")
+            # Replace DEFAULT_STAGE_TIMEOUT = <any number> with DEFAULT_STAGE_TIMEOUT = 3600
+            patched = re.sub(
+                r"DEFAULT_STAGE_TIMEOUT\s*=\s*\d+",
+                "DEFAULT_STAGE_TIMEOUT = 3600",
+                content,
+            )
+            # Replace DEFAULT_DAG_TIMEOUT = <any number> with DEFAULT_DAG_TIMEOUT = 3600
+            patched = re.sub(
+                r"DEFAULT_DAG_TIMEOUT\s*=\s*\d+",
+                "DEFAULT_DAG_TIMEOUT = 3600",
+                patched,
+            )
+            if patched != content:
+                constants_file.write_text(patched, encoding="utf-8")
+                logger.info(f"✓ Patched timeouts to 3600 in {constants_file}")
             else:
-                raise RuntimeError(f"LLM config file missing at {cfg_path}")
+                logger.debug(f"Timeouts already set correctly in {constants_file}")
         except Exception as e:
-            if strict:
-                logger.error(f"✗ Failed to ensure LLM config ({context}): {e}", exc_info=True)
-                raise
-            logger.warning(f"Failed to ensure LLM config ({context}): {e}")
+            logger.warning(f"Failed to patch timeouts: {e}")
 
     @staticmethod
     def _sanitize_url(url: str) -> str:
@@ -131,8 +220,13 @@ class GigaEvolveService:
         except subprocess.CalledProcessError:
             self._run_git_command(["git", "checkout", "--force", f"refs/tags/{ref}"], cwd)
 
-    async def clone_repository(self, force_refresh: bool = False) -> bool:
-        """Clone the GigaEvolve repository"""
+    def _clone_repository_blocking(self, force_refresh: bool = False) -> bool:
+        """
+        Clone/update the GigaEvolve repository (blocking).
+
+        NOTE: This function performs blocking filesystem and subprocess operations.
+        It must NOT run on the event loop thread.
+        """
         try:
             clone_path = Path(self.config.clone_path).resolve()
 
@@ -147,8 +241,8 @@ class GigaEvolveService:
                         logger.info(
                             f"Using local development repository at {clone_path} (not a git repo, but has run.py)"
                         )
-                        # CRITICAL: Ensure LLM config exists for local repo
-                        self._ensure_llm_config_present(clone_path, strict=True, context="local repo")
+                        # Patch stage timeout to match pipeline.yaml
+                        self._patch_stage_timeout(clone_path)
                         return True
                     else:
                         # It's a git repo, continue with normal flow
@@ -176,8 +270,8 @@ class GigaEvolveService:
                             self._install_repo_dependencies(clone_path)
                         except Exception as dep_err:
                             logger.warning(f"Dependency installation after pull/checkout failed: {dep_err}")
-                        # Ensure LLM config exists even when repo already present
-                        self._ensure_llm_config_present(clone_path, strict=False, context="after update")
+                        # Patch stage timeout to match pipeline.yaml
+                        self._patch_stage_timeout(clone_path)
                         return True
                     except subprocess.CalledProcessError as e:
                         logger.warning(f"Failed to update existing repo, will reclone: {self._redact(str(e))}")
@@ -228,11 +322,15 @@ class GigaEvolveService:
             except Exception as dep_err:
                 logger.warning(f"Dependency installation after clone failed: {dep_err}")
 
-            # Ensure local LLM config is present in the cloned repo
-            self._ensure_llm_config_present(clone_path, strict=False, context="after clone")
+            # Patch stage timeout to match pipeline.yaml
+            self._patch_stage_timeout(clone_path)
 
             return True
 
+        except (FileNotFoundError, RuntimeError) as e:
+            # Fatal requirement: prompt_layout.py must be present
+            logger.error(str(e))
+            raise
         except subprocess.CalledProcessError as e:
             logger.error("Failed to clone repository")
             if hasattr(e, "stderr") and e.stderr:
@@ -247,9 +345,15 @@ class GigaEvolveService:
                 logger.error("Repository requires authentication.!")
 
             return False
-        except Exception as e:
-            logger.error(f"Unexpected error during repository cloning: {e}")
-            return False
+
+    async def clone_repository(self, force_refresh: bool = False) -> bool:
+        """
+        Clone/update the GigaEvolve repository without blocking the event loop.
+
+        The underlying work is executed in a worker thread because it uses
+        subprocess/file operations extensively.
+        """
+        return await asyncio.to_thread(self._clone_repository_blocking, force_refresh)
 
     async def _configure_git_auth(self):
         """Configure git authentication"""
@@ -299,8 +403,17 @@ class GigaEvolveService:
             venv_dir = clone_path / ".venv"
             venv_python = venv_dir / "bin" / "python"
             venv_pip = venv_dir / "bin" / "pip"
+            deps_marker = venv_dir / ".deps_installed"
 
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, text=True)
+            # Fast-path: if venv already exists and deps marker is present, don't reinstall.
+            if venv_python.exists() and venv_pip.exists() and deps_marker.exists():
+                self.config.python_path = str(venv_python)
+                logger.info(f"Reusing existing repo venv (deps marker present) at {venv_dir}")
+                return True
+
+            # Create venv only if missing (re-creating it will blow away deps and cause churn).
+            if not venv_python.exists() or not venv_pip.exists():
+                subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, text=True)
 
             if venv_dir.exists():
                 logger.info(f"Created virtualenv at {venv_dir}")
@@ -311,11 +424,21 @@ class GigaEvolveService:
             if pyproject.exists():
                 # Install project (non-editable to minimize file churn)
                 subprocess.run([str(venv_pip), "install", "."], cwd=str(clone_path), check=True, text=True)
-                subprocess.run([str(venv_pip), "install", "scikit-learn"], cwd=str(clone_path), check=False, text=True)
                 subprocess.run(
-                    [str(venv_pip), "install", "evaluate", "rouge_score", "bert_score"],
+                    [
+                        str(venv_pip),
+                        "install",
+                        "scikit-learn",
+                        "lightautoml",
+                        "catboost",
+                        "evaluate",
+                        "rouge_score",
+                        "bert_score",
+                        "mmar-carl>=0.0.13",
+                        "httpx>=0.25.0",
+                    ],
                     cwd=str(clone_path),
-                    check=False,
+                    check=True,
                     text=True,
                 )
                 logger.info("Installed repo dependencies into dedicated venv (pyproject)")
@@ -327,6 +450,15 @@ class GigaEvolveService:
             else:
                 logger.info("No pyproject.toml or requirements.txt found; skipping dependency install")
                 return False
+
+            # Mark venv as ready (used by /health gating on the master side).
+            try:
+                deps_marker.write_text("ok\n", encoding="utf-8")
+                logger.info(f"Created deps marker at {deps_marker}")
+            except Exception as e:
+                # Marker is best-effort; if it fails, log a warning but still treat deps as installed.
+                # Returning False here causes runners to stay in 'initializing' even though installs succeeded.
+                logger.warning(f"Failed to write deps marker at {deps_marker}: {e}")
 
             # Point service to use the venv's python for running experiments
             self.config.python_path = str(venv_python)
@@ -341,7 +473,15 @@ class GigaEvolveService:
             return False
 
     def is_repository_ready(self) -> bool:
-        """Check if the repository is ready for use"""
+        """Check if the repository is ready for use.
+
+        Historically we relied on a deps marker file (<clone_path>/.venv/.deps_installed)
+        to decide whether dependencies were installed. In practice, failures to create
+        this marker caused runners to remain in 'initializing' even when installs
+        actually succeeded. To make runner health more robust, we now treat the
+        presence of a functional venv as sufficient, and recreate the marker on the fly
+        if it's missing.
+        """
         try:
             clone_path = Path(self.config.clone_path).resolve()
             if not clone_path.exists():
@@ -350,11 +490,32 @@ class GigaEvolveService:
             # Check if it's a git repository
             git_dir = clone_path / ".git"
             if git_dir.exists():
-                # Check if we can run git commands
+                # Require repo-local venv to exist; marker is best-effort.
+                venv_dir = clone_path / ".venv"
+                venv_python = venv_dir / "bin" / "python"
+                venv_pip = venv_dir / "bin" / "pip"
+                deps_marker = venv_dir / ".deps_installed"
+
+                # If venv is missing, repo is not ready.
+                if not (venv_python.exists() and venv_pip.exists()):
+                    logger.debug(f"Repository venv not ready at {venv_dir}")
+                    return False
+
+                # If marker is missing but venv exists, recreate it best-effort.
+                if not deps_marker.exists():
+                    try:
+                        deps_marker.write_text("ok\n", encoding="utf-8")
+                        logger.info(f"Recreated missing deps marker at {deps_marker}")
+                    except Exception as e:
+                        # Do not fail readiness solely because marker write failed.
+                        logger.debug(f"Failed to recreate deps marker at {deps_marker}: {e}")
+
+                # Check if we can run git commands as a final sanity check.
                 try:
                     subprocess.run(["git", "status"], cwd=clone_path, capture_output=True, text=True, check=True)
                     return True
-                except subprocess.CalledProcessError:
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"'git status' failed for repo at {clone_path}: {e}")
                     return False
             else:
                 # Check if it's a mock repository (has run_experiment.py)
@@ -378,6 +539,7 @@ class GigaEvolveService:
             if not git_dir.exists():
                 return {
                     "path": str(clone_path),
+                    "tag": "mock",
                     "commit_hash": "mock",
                     "remote_url": self.config.repo_url,
                     "branch": "mock",
@@ -388,6 +550,14 @@ class GigaEvolveService:
             # Get current commit hash
             result = self._run_git_command(["git", "rev-parse", "HEAD"], clone_path)
             commit_hash = result.stdout.strip()
+
+            # Try to get exact tag for current commit
+            tag = None
+            try:
+                result = self._run_git_command(["git", "describe", "--tags", "--exact-match"], clone_path)
+                tag = result.stdout.strip() if result.stdout else None
+            except subprocess.CalledProcessError:
+                tag = None
 
             # Get remote URL
             result = self._run_git_command(["git", "config", "--get", "remote.origin.url"], clone_path)
@@ -411,6 +581,7 @@ class GigaEvolveService:
 
             return {
                 "path": str(clone_path),
+                "tag": tag,
                 "commit_hash": commit_hash,
                 "remote_url": remote_url,
                 "branch": branch,
@@ -421,57 +592,6 @@ class GigaEvolveService:
         except Exception as e:
             logger.error(f"Error getting repository info: {e}")
             return {"error": str(e)}
-
-    def _ensure_llm_config_file(self, clone_path: Path) -> None:
-        """
-        Create/update local LLM Hydra config expected by GigaEvo Core:
-          <repo>/config/llm/custom.yaml
-        The repo-level llm_models.yml is the single source of truth; we bake runtime values
-        into the generated Hydra config and do not rely on env/.env for LLM settings.
-        """
-        try:
-            llm_dir = clone_path / "config" / "llm"
-            llm_dir.mkdir(parents=True, exist_ok=True)
-            cfg_path = llm_dir / "custom.yaml"
-
-            # NOTE: selected model id is provided per experiment in config.json.
-            # Here we write a template config; actual values are written right before run.
-            # This method remains to ensure the file exists with a valid structure.
-            content = (
-                "# @package _global_\n\n"
-                "llm:\n"
-                "  _target_: gigaevo.llm.models.MultiModelRouter\n"
-                "  _convert_: all\n"
-                "  models:\n"
-                "    - _target_: langchain_openai.ChatOpenAI\n"
-                "      model: local-inference\n"
-                '      api_key: ""\n'
-                "      temperature: 0.7\n"
-                "      max_tokens: 2048\n"
-                "      top_p: 1.0\n"
-                '      base_url: ""\n'
-                "      request_timeout: 30\n"
-                "      max_retries: 3\n"
-                "      timeout: 30\n"
-                "  probabilities: [1.0]\n"
-            )
-
-            # Always write/overwrite to keep deterministic and ensure latest format
-            cfg_path.write_text(content, encoding="utf-8")
-            logger.info(f"Created/updated LLM config at {cfg_path}")
-            logger.debug(f"LLM config content:\n{content}")
-
-            # Verify the file was created successfully
-            if not cfg_path.exists():
-                raise RuntimeError(f"Config file was not created at {cfg_path}")
-            if cfg_path.stat().st_size == 0:
-                raise RuntimeError(f"Config file is empty at {cfg_path}")
-
-        except Exception as e:
-            logger.error(
-                f"Failed to create LLM config at {clone_path / 'config' / 'llm' / 'custom.yaml'}: {e}", exc_info=True
-            )
-            raise RuntimeError(f"Error writing LLM config: {e}") from e
 
     def _write_llm_config_for_model(self, clone_path: Path, model_id: str) -> None:
         """Write Hydra LLM config with runtime values from llm_models.yml for the selected model."""
@@ -506,12 +626,14 @@ class GigaEvolveService:
                         "max_tokens": int(runtime.get("max_tokens", 2048)),
                         "top_p": float(runtime.get("top_p", 1.0)),
                         "base_url": runtime.get("base_url"),
-                        "request_timeout": int(runtime.get("request_timeout", 30)),
+                        "request_timeout": int(runtime.get("request_timeout", 600)),
                         "max_retries": int(runtime.get("max_retries", 3)),
-                        "timeout": int(runtime.get("timeout", 30)),
+                        "timeout": int(runtime.get("timeout", 600)),
                     }
                 ],
                 "probabilities": [1.0],
+                # TODO: Re-enable when writer param is supported by gigaevo-core
+                # "writer": "${writer}",
             }
         }
 
@@ -679,6 +801,23 @@ class GigaEvolveService:
 
             # Prepare environment (LLM base URL and API key)
             env = self._env_with_problem_dir(problem_dir)
+
+            # Add dataset configuration to environment variables
+            dataset_size = config.get("dataset_size")
+            if dataset_size is not None:
+                env["DATASET_SIZE"] = str(int(dataset_size))
+            test_size = config.get("test_size")
+            if test_size is not None:
+                env["TEST_SIZE"] = str(float(test_size))
+            
+            # Limit validation samples for chain experiments to speed up validation
+            # Use max 2 samples for train and 1 for val to keep validation very fast
+            # This significantly reduces validation time from hours to under 2 minutes
+            env["CARL__MAX_TRAIN_SAMPLES"] = "2"
+            env["CARL__MAX_VAL_SAMPLES"] = "1"
+            # Reduce chain timeout per example to fail faster on problematic cases
+            env["CARL__CHAIN_TIMEOUT"] = "15"  # 15 seconds per chain execution
+            
             # Resolve selected model id from experiment config and load runtime values from llm_models.yml
             selected_model_id = str(config.get("llm_model") or "").strip() or get_default_llm_model_id()
             runtime = get_llm_runtime_required(
@@ -689,9 +828,9 @@ class GigaEvolveService:
             llm_api_key = str(runtime.get("api_key") or "")
             llm_model = str(runtime.get("model") or selected_model_id)
             llm_max_tokens = str(runtime.get("max_tokens", 2048))
-            llm_request_timeout = str(runtime.get("request_timeout", 120.0))
+            llm_request_timeout = str(runtime.get("request_timeout", 600.0))
             llm_max_retries = str(runtime.get("max_retries", 3))
-            llm_timeout = str(runtime.get("timeout", 120.0))
+            llm_timeout = str(runtime.get("timeout", 600.0))
 
             # PROMPT_* variables use a separate, independently configurable model id.
             prompt_model_id = str(config.get("prompt_llm_model") or "").strip() or get_default_prompt_llm_model_id()
@@ -769,32 +908,54 @@ class GigaEvolveService:
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            # Determine per-experiment timeout (seconds)
-            timeout_limit = config.get("timeout_seconds", self.config.experiment_timeout)
+            timeout_limit = config.get("timeout_seconds")
+            if timeout_limit == 0:
+                timeout_limit = None
+            elif timeout_limit is None:
+                max_iterations = config.get("max_iterations", 100)
+                calculated_timeout = max(3600, int(max_iterations * 90 * 1.3))
+                timeout_limit = calculated_timeout
+                logger.info(
+                    f"Auto-calculated timeout for {experiment_id}: {timeout_limit}s "
+                    f"based on {max_iterations} iterations"
+                )
+            else:
+                max_iterations = config.get("max_iterations", 100)
+                min_recommended = max(3600, int(max_iterations * 90 * 1.3))
+                if timeout_limit < min_recommended:
+                    logger.warning(
+                        f"Provided timeout {timeout_limit}s may be insufficient for {max_iterations} iterations. "
+                        f"Recommended minimum: {min_recommended}s"
+                    )
 
             # Periodically check for timeout and optional cancellation
             stdout_b = b""
             stderr_b = b""
             try:
                 loop = asyncio.get_running_loop()
-                deadline = loop.time() + timeout_limit
+                deadline = loop.time() + timeout_limit if timeout_limit else None
                 while True:
                     try:
                         # Wait in 1s slices, but do not exceed remaining timeout
-                        remaining = deadline - loop.time()
-                        if remaining <= 0:
-                            raise asyncio.TimeoutError()
-                        await asyncio.wait_for(proc.wait(), timeout=min(1, remaining))
+                        if deadline is not None:
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                raise asyncio.TimeoutError()
+                            wait_timeout = min(1, remaining)
+                        else:
+                            # No timeout, wait 1 second at a time
+                            wait_timeout = 1
+                        await asyncio.wait_for(proc.wait(), timeout=wait_timeout)
                         break
                     except asyncio.TimeoutError:
-                        # Check global timeout first
-                        if loop.time() >= deadline:
+                        # Check global timeout first (only if timeout is enabled)
+                        if deadline is not None and loop.time() >= deadline:
                             try:
                                 proc.kill()
                             except ProcessLookupError:
                                 pass
-                            # Treat reaching the time limit as a successful (but time-bounded) completion
-                            return {"output": "Experiment reached time limit", "success": True, "timed_out": True}
+                            # Treat reaching the time limit as a failed completion
+                            return {"output": "Experiment reached time limit", "success": False, "timed_out": True}
                         # If a cancel_check is provided, consult it
                         if cancel_check is not None:
                             try:
@@ -816,8 +977,8 @@ class GigaEvolveService:
                     proc.kill()
                 except ProcessLookupError:
                     pass
-                # Fallback: also treat this path as a time-bounded successful completion
-                return {"output": "Experiment reached time limit", "success": True, "timed_out": True}
+                # Fallback: also treat this path as a failed completion due to timeout
+                return {"output": "Experiment reached time limit", "success": False, "timed_out": True}
 
             stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
             stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
@@ -909,6 +1070,24 @@ class GigaEvolveService:
         if not host or port is None:
             raise ValueError(f"Invalid Redis URL (host/port missing): '{url_str}'")
         return host, port, db
+
+    @staticmethod
+    def _redis_value_to_float(value: Any, field_name: str = "value") -> Optional[float]:
+        """Convert Redis value to float. Returns None for empty/invalid values."""
+        if value is None:
+            return None
+
+        # Convert to string and strip whitespace
+        value_str = str(value).strip()
+        if not value_str:
+            return None
+
+        try:
+            # Convert to float to preserve precision and handle both integers and decimals
+            return float(value_str)
+        except (ValueError, TypeError, OverflowError) as e:
+            logger.warning(f"Failed to convert Redis {field_name} '{value!r}': {e}")
+            return None
 
     async def cleanup_experiment(self, experiment_id: str) -> bool:
         """Clean up experiment artifacts"""
@@ -1173,14 +1352,46 @@ class GigaEvolveService:
                 "best_created_at": (
                     str(best_row.get("created_at")) if best_row and best_row.get("created_at") is not None else None
                 ),
-                "best_program": (best_row.get("code") if best_row else None),
+                "best_program": (
+                    _extract_prompt_template(best_row.get("code")) or best_row.get("code") if best_row else None
+                ),
             }
+
+            # Add token counters
+            try:
+                cfg_path = clone_path / "problems" / str(experiment_id) / "config.json"
+                if cfg_path.exists():
+                    run_cfg = json.loads(cfg_path.read_text(encoding="utf-8") or "{}")
+                    model_id = str(run_cfg.get("llm_model") or "").strip()
+                    if model_id:
+                        try:
+                            redis_host, redis_port, redis_db = self._redis_host_port_db()
+                            redis_url = f"redis://{redis_host}:{redis_port}/{redis_db}"
+                            runtime = get_llm_runtime_required(model_id, required_keys={"model"})
+                            model_name = str(runtime.get("model") or model_id).replace("/", "_")
+                            problem_name = self._normalize_problem_name(experiment_id)
+                            async with Redis.from_url(redis_url, decode_responses=True) as r:
+                                hash_key = f"{problem_name}:metrics:latest"
+                                total_raw, ctx_raw = await r.hmget(
+                                    hash_key,
+                                    f"llm/tokens/default/{model_name}/cumulative_total_tokens",
+                                    f"llm/tokens/default/{model_name}/cumulative_context_tokens",
+                                )
+                                total_tokens = self._redis_value_to_float(total_raw, "cumulative_total_tokens")
+                                if total_tokens is not None:
+                                    summary["cumulative_total_tokens"] = total_tokens
+
+                                ctx_tokens = self._redis_value_to_float(ctx_raw, "cumulative_context_tokens")
+                                if ctx_tokens is not None:
+                                    summary["cumulative_context_tokens"] = ctx_tokens
+                        except Exception as redis_err:
+                            logger.warning(f"Failed to fetch token metrics for {experiment_id}: {redis_err}")
+            except Exception as e:
+                logger.debug(f"Token metrics fetch failed for {experiment_id}: {e}")
 
             # Write JSON summary
             try:
-                import json as _json
-
-                out_json.write_text(_json.dumps(summary, indent=2), encoding="utf-8")
+                out_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
             except Exception as _e:
                 return {"success": False, "error": f"Failed to write JSON summary: {_e}"}
 

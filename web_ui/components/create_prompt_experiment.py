@@ -3,6 +3,7 @@
 import os
 import re
 import tempfile
+from typing import Optional
 
 import gradio as gr
 import requests
@@ -15,6 +16,7 @@ from config.settings import (
 from loguru import logger
 from utils.file_handlers import (
     cleanup_temp_file,
+    count_csv_rows,
     extract_source_path_from_upload,
     read_csv_columns,
 )
@@ -101,26 +103,41 @@ class CreatePromptExperimentComponent(BaseComponent):
                         info="Maximum number of evolution iterations",
                     )
                     llm_model_input = gr.Dropdown(
-                        choices=get_llm_model_choices(),  # (label, id)
-                        value=get_default_llm_model_id(),  # id
+                        choices=get_llm_model_choices(),
+                        value=get_default_llm_model_id(),
                         label="Evolution Model",
                         info="Model used by the evolution engine",
                     )
                     prompt_llm_model_input = gr.Dropdown(
-                        choices=get_llm_model_choices(),  # (label, id)
-                        value=get_default_prompt_llm_model_id(),  # id
+                        choices=get_llm_model_choices(),
+                        value=get_default_prompt_llm_model_id(),
                         label="Prompt Template Model",
                         info="Model used by the prompt template evaluator",
+                    )
+                    dataset_size_input = gr.Number(
+                        value=None,
+                        label="Dataset Size (rows)",
+                        info="Number of rows to use from dataset (min 10% of dataset, max 100%, leave empty to use all)",
+                        precision=0,
+                    )
+                    test_size_input = gr.Slider(
+                        minimum=0.1,
+                        maximum=0.9,
+                        value=0.2,
+                        step=0.05,
+                        label="Test Size Ratio",
+                        info="Fraction of dataset to use for testing (0.2 = 20%)",
+                    )
+                    split_info = gr.Markdown(
+                        value="",
+                        visible=False,
+                        elem_classes=["split-info"],
                     )
 
             with gr.Row():
                 with gr.Column(scale=2):
-                    # Base prompt section
                     gr.Markdown("### Prompt Template")
 
-                    # (Local Prompt Presets dropdown removed; only top preset buttons are used)
-
-                    # Example section
                     with gr.Accordion("📝 Prompt Template Examples", open=False):
                         gr.Markdown(
                             """
@@ -154,15 +171,12 @@ class CreatePromptExperimentComponent(BaseComponent):
                         info="Use {column_name} syntax for template placeholders. Example: 'Predict the target based on {feature1} and {feature2}'",
                     )
 
-                # Available columns section
                 with gr.Column(scale=1):
                     gr.Markdown("#### Available Columns (click to add to prompt)")
                     column_buttons_container = gr.Group()
                     with column_buttons_container:
-                        # This will be populated dynamically based on uploaded file
                         column_buttons_row = gr.Row(visible=False, elem_classes=["column-buttons-row"])
                         with column_buttons_row:
-                            # We'll add up to 8 column buttons dynamically
                             col_btn_1 = gr.Button("", size="sm", visible=False)
                             col_btn_2 = gr.Button("", size="sm", visible=False)
                             col_btn_3 = gr.Button("", size="sm", visible=False)
@@ -177,7 +191,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                         "Generate Baseline Prompt", size="sm", variant="secondary", visible=False
                     )
 
-                    # Validation Criteria section
                     gr.Markdown("#### 🔧 Validation Criteria")
                     with gr.Group():
                         validation_type_input = gr.Dropdown(
@@ -187,7 +200,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                             interactive=True,
                         )
 
-                        # Binary validation options
                         with gr.Group() as binary_validation_group:
                             binary_validation_method_input = gr.Dropdown(
                                 choices=["equality", "substring", "regexp"],
@@ -204,7 +216,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                                 info="Regular expression with capture group to extract and compare with ground truth",
                             )
 
-                        # Continuous validation options
                         with gr.Group() as continuous_validation_group:
                             continuous_metric_input = gr.Dropdown(
                                 choices=[
@@ -220,7 +231,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                                 interactive=True,
                             )
 
-            # Action buttons
             with gr.Row():
                 create_btn = gr.Button("Create Experiment", variant="primary", size="lg")
                 clean_btn = gr.Button("🧹 Clean Form", variant="secondary", size="lg")
@@ -232,15 +242,12 @@ class CreatePromptExperimentComponent(BaseComponent):
                 lines=4,
             )
 
-            # Store current columns for template insertion
             current_columns_state = gr.State(value=[])
-            # Track clicked columns and button offset for rotation
             clicked_columns_state = gr.State(value=[])
             button_offset_state = gr.State(value=0)
-            # Store preset data_path (when dataset is uploaded by backend)
             preset_data_path_state = gr.State(value="")
+            max_dataset_size_state = gr.State(value=None)
 
-            # Wire up event handlers
             self._setup_event_handlers(
                 data_file_input,
                 target_field_input,
@@ -276,6 +283,10 @@ class CreatePromptExperimentComponent(BaseComponent):
                 create_output,
                 preset_data_path_state,
                 dataset_info,
+                dataset_size_input,
+                test_size_input,
+                split_info,
+                max_dataset_size_state,
                 btn_cmns,
                 btn_emot,
                 btn_gsm8k,
@@ -322,6 +333,10 @@ class CreatePromptExperimentComponent(BaseComponent):
             create_output,
             preset_data_path_state,
             dataset_info,
+            dataset_size_input,
+            test_size_input,
+            split_info,
+            max_dataset_size_state,
             btn_cmns,
             btn_emot,
             btn_gsm8k,
@@ -331,18 +346,27 @@ class CreatePromptExperimentComponent(BaseComponent):
 
         column_buttons = [col_btn_1, col_btn_2, col_btn_3, col_btn_4, col_btn_5, col_btn_6, col_btn_7, col_btn_8]
 
-        # Update target choices when file changes
         def _update_file_and_columns(file):
             src_path = extract_source_path_from_upload(file)
             file_columns = read_csv_columns(src_path) if src_path else []
 
-            # Update dataset info
             dataset_info_update = gr.update()
+            dataset_size_update = gr.update(value=None)
+            new_max_size = None
+
             if src_path:
                 filename = os.path.basename(src_path)
                 dataset_info_update = gr.update(value=f"📁 Using uploaded file: {filename}")
 
-            # Update target dropdown
+                try:
+                    row_count = count_csv_rows(src_path)
+                    if row_count is not None and row_count > 0:
+                        logger.info(f"Counted {row_count} rows in uploaded file: {src_path}")
+                        dataset_size_update = gr.update(value=row_count)
+                        new_max_size = row_count
+                except Exception as e:
+                    logger.warning(f"Failed to count rows in uploaded file {src_path}: {e}")
+
             target_choices = get_default_target_choices("classification", file_columns)
             target_update = gr.update(
                 choices=target_choices,
@@ -350,13 +374,10 @@ class CreatePromptExperimentComponent(BaseComponent):
                 visible=bool(target_choices),
             )
 
-            # Initialize state for column tracking
             clicked_columns = []
             button_offset = 0
 
-            # Update column buttons and generate baseline button
             if file_columns:
-                # Show first 8 columns as buttons (excluding target initially)
                 target_col = target_choices[0] if target_choices else None
                 available_columns = [col for col in file_columns if col != target_col]
                 visible_columns = available_columns[:8]
@@ -364,34 +385,36 @@ class CreatePromptExperimentComponent(BaseComponent):
                 button_updates = []
                 for col in visible_columns:
                     button_updates.append(gr.update(value=col, visible=True, interactive=True))
-                # Hide remaining buttons
                 for _ in range(len(visible_columns), 8):
                     button_updates.append(gr.update(visible=False))
 
                 return (
                     dataset_info_update,
                     target_update,
-                    gr.update(visible=True),  # column_buttons_row
-                    gr.update(visible=False),  # no_columns_msg
-                    gr.update(visible=True, interactive=True),  # generate_baseline_btn
+                    gr.update(visible=True),
+                    gr.update(visible=False),
+                    gr.update(visible=True, interactive=True),
                     *button_updates,
-                    file_columns,  # current_columns_state
-                    clicked_columns,  # clicked_columns_state
-                    button_offset,  # button_offset_state
+                    file_columns,
+                    clicked_columns,
+                    button_offset,
+                    dataset_size_update,
+                    new_max_size,
                 )
             else:
-                # Hide all column buttons and generate baseline button
                 button_updates = [gr.update(visible=False) for _ in range(8)]
                 return (
                     dataset_info_update,
                     target_update,
-                    gr.update(visible=False),  # column_buttons_row
-                    gr.update(visible=True),  # no_columns_msg
-                    gr.update(visible=False),  # generate_baseline_btn
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    gr.update(visible=False),
                     *button_updates,
-                    [],  # current_columns_state
-                    [],  # clicked_columns_state
-                    0,  # button_offset_state
+                    [],
+                    [],
+                    0,
+                    dataset_size_update,
+                    None,
                 )
 
         data_file_input.change(
@@ -407,13 +430,83 @@ class CreatePromptExperimentComponent(BaseComponent):
                 current_columns_state,
                 clicked_columns_state,
                 button_offset_state,
+                dataset_size_input,
+                max_dataset_size_state,
             ],
         )
 
-        # Update column buttons when target changes (exclude target column)
+        def _update_split_info(dataset_size, test_size, data_file, max_size):
+            if (
+                dataset_size is None
+                or dataset_size == ""
+                or (isinstance(dataset_size, (int, float)) and dataset_size <= 0)
+            ):
+                return gr.update(value="", visible=False)
+
+            try:
+                dataset_size = int(float(dataset_size))
+                if dataset_size <= 0:
+                    return gr.update(value="", visible=False)
+
+                min_size = None
+                if max_size is not None and max_size > 0:
+                    min_size = max(1, int(max_size * 0.1))
+
+                    if dataset_size > max_size:
+                        dataset_size = max_size
+                        logger.warning(f"Dataset size exceeds maximum {max_size}, using {max_size}")
+
+                    if dataset_size < min_size:
+                        dataset_size = min_size
+                        logger.warning(
+                            f"Dataset size is less than minimum {min_size} (10% of {max_size}), using {min_size}"
+                        )
+
+                test_size_ratio = float(test_size) if test_size is not None else 0.2
+                train_size_ratio = 1.0 - test_size_ratio
+
+                train_rows = int(dataset_size * train_size_ratio)
+                test_rows = int(dataset_size * test_size_ratio)
+
+                info_text = f"**Split Preview:**\n- Train: {train_rows} rows ({train_size_ratio * 100:.1f}%)\n- Test: {test_rows} rows ({test_size_ratio * 100:.1f}%)\n- Total: {dataset_size} rows"
+                if max_size is not None:
+                    info_text += f"\n- Max available: {max_size} rows"
+                    if min_size is not None:
+                        info_text += f"\n- Minimum required: {min_size} rows (10% of dataset)"
+                return gr.update(value=info_text, visible=True)
+            except (ValueError, TypeError):
+                return gr.update(value="", visible=False)
+
+        def _update_split_info_with_validation(dataset_size, test_size, data_file, max_size):
+            """Update split info and validate dataset size (min 10%, max 100%)."""
+            result = _update_split_info(dataset_size, test_size, data_file, max_size)
+
+            try:
+                dataset_size_int = int(float(dataset_size)) if dataset_size not in (None, "") else None
+                if dataset_size_int and max_size and max_size > 0:
+                    min_size = max(1, int(max_size * 0.1))
+                    if dataset_size_int > max_size:
+                        return gr.update(value=max_size), result
+                    elif dataset_size_int < min_size:
+                        return gr.update(value=min_size), result
+            except (ValueError, TypeError):
+                pass
+
+            return gr.update(), result
+
+        dataset_size_input.change(
+            _update_split_info_with_validation,
+            inputs=[dataset_size_input, test_size_input, data_file_input, max_dataset_size_state],
+            outputs=[dataset_size_input, split_info],
+        )
+        test_size_input.change(
+            _update_split_info,
+            inputs=[dataset_size_input, test_size_input, data_file_input, max_dataset_size_state],
+            outputs=[split_info],
+        )
+
         def _update_column_buttons_exclude_target(target_column, all_columns):
             if not all_columns:
-                # Hide all buttons and baseline button
                 button_updates = [gr.update(visible=False) for _ in range(8)]
                 return (
                     [gr.update(visible=False), gr.update(visible=True), gr.update(visible=False)]
@@ -421,7 +514,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                     + [[], 0]
                 )
 
-            # Filter out target column
             available_columns = [col for col in all_columns if col != target_column]
             visible_columns = available_columns[:8]
 
@@ -448,33 +540,30 @@ class CreatePromptExperimentComponent(BaseComponent):
             ],
         )
 
-        # Handle validation type change for cascading behavior
         def _handle_validation_type_change(validation_type):
-            # Handle validation type selection change.
             if validation_type == "Binary (0/1)":
                 return (
-                    gr.update(visible=True),  # binary_validation_group
-                    gr.update(value="equality", visible=True),  # binary_validation_method_input
-                    gr.update(visible=False),  # regexp_pattern_input
-                    gr.update(visible=False),  # continuous_validation_group
-                    gr.update(value=None, visible=False),  # continuous_metric_input
+                    gr.update(visible=True),
+                    gr.update(value="equality", visible=True),
+                    gr.update(visible=False),
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
                 )
             elif validation_type == "Continuous (0..1)":
                 return (
-                    gr.update(visible=False),  # binary_validation_group
-                    gr.update(value=None, visible=False),  # binary_validation_method_input
-                    gr.update(visible=False),  # regexp_pattern_input
-                    gr.update(visible=True),  # continuous_validation_group
-                    gr.update(value="ROUGE-1", visible=True),  # continuous_metric_input
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
+                    gr.update(visible=False),
+                    gr.update(visible=True),
+                    gr.update(value="ROUGE-1", visible=True),
                 )
             else:
-                # No selection made
                 return (
-                    gr.update(visible=False),  # binary_validation_group
-                    gr.update(value=None, visible=False),  # binary_validation_method_input
-                    gr.update(visible=False),  # regexp_pattern_input
-                    gr.update(visible=False),  # continuous_validation_group
-                    gr.update(value=None, visible=False),  # continuous_metric_input
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
+                    gr.update(visible=False),
+                    gr.update(visible=False),
+                    gr.update(value=None, visible=False),
                 )
 
         validation_type_input.change(
@@ -489,12 +578,11 @@ class CreatePromptExperimentComponent(BaseComponent):
             ],
         )
 
-        # Handle binary validation method change
         def _handle_binary_method_change(binary_method):
             if binary_method == "regexp":
-                return gr.update(visible=True)  # Show regexp_pattern_input
+                return gr.update(visible=True)
             else:
-                return gr.update(visible=False)  # Hide regexp_pattern_input
+                return gr.update(visible=False)
 
         binary_validation_method_input.change(
             _handle_binary_method_change,
@@ -502,28 +590,23 @@ class CreatePromptExperimentComponent(BaseComponent):
             outputs=[regexp_pattern_input],
         )
 
-        # Set up click handlers for column buttons with proper closure and rotation
         for i, btn in enumerate(column_buttons):
 
             def handle_column_click(
                 column_name, current_prompt, all_columns, clicked_columns, button_offset, target_column
             ):
-                if not column_name:  # Button has no value, don't do anything
+                if not column_name:
                     return current_prompt, clicked_columns, button_offset, *[gr.update() for _ in column_buttons]
 
-                # Add column to clicked list
                 new_clicked_columns = clicked_columns + [column_name]
 
-                # Insert template into prompt
                 updated_prompt = self._insert_column_template(current_prompt, column_name)
 
-                # Calculate next set of columns to show
                 available_columns = [
                     col for col in all_columns if col != target_column and col not in new_clicked_columns
                 ]
                 next_columns = available_columns[button_offset : button_offset + 8]
 
-                # Update buttons with next columns
                 button_updates = []
                 for i, btn in enumerate(column_buttons):
                     if i < len(next_columns):
@@ -531,7 +614,6 @@ class CreatePromptExperimentComponent(BaseComponent):
                     else:
                         button_updates.append(gr.update(visible=False))
 
-                # Update offset for next rotation
                 new_button_offset = button_offset + 8 if len(available_columns) > button_offset + 8 else button_offset
 
                 return [updated_prompt, new_clicked_columns, new_button_offset] + button_updates
@@ -539,7 +621,7 @@ class CreatePromptExperimentComponent(BaseComponent):
             btn.click(
                 handle_column_click,
                 inputs=[
-                    btn,  # This passes the button's value directly
+                    btn,
                     base_prompt_input,
                     current_columns_state,
                     clicked_columns_state,
@@ -549,19 +631,16 @@ class CreatePromptExperimentComponent(BaseComponent):
                 outputs=[base_prompt_input, clicked_columns_state, button_offset_state, *column_buttons],
             )
 
-        # Generate baseline prompt handler
         def _generate_baseline_prompt(all_columns, target_column):
             """Generate a baseline prompt using available columns."""
             if not all_columns or not target_column:
                 return gr.update(value="")
 
-            # Filter out target column to get feature columns
             feature_columns = [col for col in all_columns if col != target_column]
 
             if not feature_columns:
                 return gr.update(value="")
 
-            # Create a baseline prompt template
             key_features = feature_columns
             features_text = "\n".join([f"- {{{col}}}" for col in key_features])
 
@@ -589,32 +668,34 @@ Answer: [expected answer]"""
             outputs=[base_prompt_input],
         )
 
-        # Clean form
         def _clean_form():
             return (
-                gr.update(value=""),  # name_input
-                gr.update(value=""),  # description_input
-                gr.update(value=None),  # data_file_input
-                gr.update(choices=[], value=None, visible=False),  # target_field_input
-                gr.update(value="No dataset selected"),  # dataset_info
-                gr.update(value=100),  # max_iterations_input
-                gr.update(value=get_default_llm_model_id()),  # llm_model_input
-                gr.update(value=get_default_prompt_llm_model_id()),  # prompt_llm_model_input
-                gr.update(value=""),  # base_prompt_input
-                gr.update(visible=False),  # column_buttons_row
-                gr.update(visible=True),  # no_columns_msg
-                gr.update(visible=False),  # generate_baseline_btn
-                *[gr.update(visible=False) for _ in range(8)],  # column buttons
-                [],  # current_columns_state
-                [],  # clicked_columns_state
-                0,  # button_offset_state
-                gr.update(value=None),  # validation_type_input
-                gr.update(visible=False),  # binary_validation_group
-                gr.update(value=None),  # binary_validation_method_input
-                gr.update(value=""),  # regexp_pattern_input
-                gr.update(visible=False),  # continuous_validation_group
-                gr.update(value=None),  # continuous_metric_input
-                gr.update(value=""),  # create_output
+                gr.update(value=""),
+                gr.update(value=""),
+                gr.update(value=None),
+                gr.update(choices=[], value=None, visible=False),
+                gr.update(value="No dataset selected"),
+                gr.update(value=100),
+                gr.update(value=get_default_llm_model_id()),
+                gr.update(value=get_default_prompt_llm_model_id()),
+                gr.update(value=""),
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=False),
+                *[gr.update(visible=False) for _ in range(8)],
+                [],
+                [],
+                0,
+                gr.update(value=None),
+                gr.update(visible=False),
+                gr.update(value=None),
+                gr.update(value=""),
+                gr.update(visible=False),
+                gr.update(value=None),
+                gr.update(value=None),
+                gr.update(value=0.2),
+                gr.update(value="", visible=False),
+                gr.update(value=""),
             )
 
         clean_btn.click(
@@ -642,12 +723,13 @@ Answer: [expected answer]"""
                 regexp_pattern_input,
                 continuous_validation_group,
                 continuous_metric_input,
+                dataset_size_input,
+                test_size_input,
+                split_info,
                 create_output,
-                # leave presets controls intact
             ],
         )
 
-        # Create experiment
         create_btn.click(
             self._create_prompt_experiment,
             inputs=[
@@ -665,11 +747,12 @@ Answer: [expected answer]"""
                 regexp_pattern_input,
                 continuous_metric_input,
                 preset_data_path_state,
+                dataset_size_input,
+                test_size_input,
             ],
             outputs=create_output,
         )
 
-        # Local presets population
         def _init_local_presets():
             """Fetch and populate local preset buttons with names."""
             examples = self.exp_manager.list_local_prompt_presets()
@@ -683,13 +766,11 @@ Answer: [expected answer]"""
                     updates.append(gr.update(visible=False))
             return updates
 
-        # Initialize local preset buttons (best-effort)
         try:
             _init_local_presets()
         except Exception:
             pass
 
-        # Prefill from a local preset
         def _prefill_from_local_preset(label, current_name, current_desc):
             """Fetch preset by label -> name; prefill name and base prompt."""
             if not label:
@@ -701,7 +782,6 @@ Answer: [expected answer]"""
             baseline_prompt = details.get("baseline_prompt") or ""
             dataset = details.get("dataset") or {}
             ds_text = f"Preset dataset: {dataset.get('train')}" if dataset.get("train") else "Preset dataset: (none)"
-            # Prefill name if empty
             new_name = current_name or details.get("label") or label
             return (
                 gr.update(value=new_name),
@@ -709,14 +789,7 @@ Answer: [expected answer]"""
                 gr.update(visible=True, value=f"{ds_text}"),
             )
 
-        # (Dynamic local preset buttons removed)
-
-        # PromptEvo Examples prefill
-        # (PromptEvo Examples dropdown prefill removed)
-
-        # Helper: prefill and upload dataset for a fixed task name
         def _prefill_fixed_task(task_name):
-            # Use local preset details derived from master_api/prompt_examples create.sh and files
             details = self.exp_manager.get_local_prompt_preset(task_name)
             if not details:
                 return (
@@ -724,14 +797,16 @@ Answer: [expected answer]"""
                     gr.update(),
                     gr.update(),
                     gr.update(),
-                    "",  # preset_data_path_state
+                    "",
                     gr.update(visible=True, value=f"Error: failed to load example '{task_name}'"),
+                    gr.update(value=None),
+                    gr.update(value=0.2),
+                    gr.update(value="", visible=False),
+                    None,
                 )
 
-            # Upload preset dataset to storage to get data_path
             up = self.exp_manager.upload_local_prompt_preset_dataset(task_name)
             data_path = up.get("data_path", "") if isinstance(up, dict) else ""
-            # Build public URL for MinIO object
             public_url = ""
             try:
                 if data_path:
@@ -754,16 +829,82 @@ Answer: [expected answer]"""
             base_prompt = details.get("baseline_prompt") or ""
             target_field = details.get("target_field") or ""
 
+            dataset_size_update = gr.update(value=None)
+            max_size = None
+            if data_path:
+                try:
+                    base = INTERNAL_S3_API_URL.rstrip("/")
+                    bucket = STORAGE_BUCKET_NAME
+                    url = f"{base}/{bucket}/{data_path}"
+                    logger.debug(f"Downloading preset dataset for row count from: {url}")
+                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                        tmp_path = tmp.name
+                    try:
+                        resp = requests.get(url, timeout=30)
+                        resp.raise_for_status()
+                        with open(tmp_path, "wb") as f:
+                            f.write(resp.content)
+                        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                            train_rows = count_csv_rows(tmp_path)
+                            if train_rows is not None and train_rows > 0:
+                                val_path = data_path.replace("/train.csv", "/val.csv")
+                                total_rows = train_rows
+
+                                try:
+                                    val_url = f"{base}/{bucket}/{val_path}"
+                                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as val_tmp:
+                                        val_tmp_path = val_tmp.name
+                                    try:
+                                        val_resp = requests.get(val_url, timeout=30)
+                                        if val_resp.ok:
+                                            with open(val_tmp_path, "wb") as f:
+                                                f.write(val_resp.content)
+                                            val_rows = count_csv_rows(val_tmp_path)
+                                            if val_rows is not None and val_rows > 0:
+                                                total_rows = train_rows + val_rows
+                                    finally:
+                                        try:
+                                            if os.path.exists(val_tmp_path):
+                                                os.unlink(val_tmp_path)
+                                        except Exception:
+                                            pass
+                                except Exception as val_err:
+                                    logger.debug(
+                                        f"val.csv not available for {task_name}, using train.csv rows only: {val_err}"
+                                    )
+                                    total_rows = train_rows
+
+                                logger.info(
+                                    f"Counted {total_rows} total rows in prompt preset dataset (train: {train_rows}, total: {total_rows})"
+                                )
+                                dataset_size_update = gr.update(value=total_rows)
+                                max_size = total_rows
+                            else:
+                                logger.warning(f"Failed to count rows or empty dataset: {data_path}")
+                        else:
+                            logger.error(f"Downloaded file is empty or missing: {tmp_path}")
+                    finally:
+                        try:
+                            if os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.error(f"Failed to count rows for preset dataset {data_path}: {e}", exc_info=True)
+
             return (
                 gr.update(value=label),
                 gr.update(value=desc),
                 gr.update(value=base_prompt),
                 gr.update(value=target_field, choices=[target_field]),
-                data_path,  # preset_data_path_state
+                data_path,
                 gr.update(value=ds_msg),
+                dataset_size_update,
+                gr.update(value=0.2),
+                gr.update(value="", visible=False),
+                max_size,
             )
 
-        # Wire fixed task buttons
         for btn, task in [
             (btn_cmns, "commonsense"),
             (btn_emot, "emotion"),
@@ -771,7 +912,7 @@ Answer: [expected answer]"""
             (btn_sent, "sentiment_analysis"),
             (btn_xsum, "xsum"),
         ]:
-            # Bind task name via default argument to avoid missing-arg warnings
+
             def _make_prefill(task_name: str):
                 return lambda: _prefill_fixed_task(task_name)
 
@@ -785,6 +926,10 @@ Answer: [expected answer]"""
                     target_field_input,
                     preset_data_path_state,
                     dataset_info,
+                    dataset_size_input,
+                    test_size_input,
+                    split_info,
+                    max_dataset_size_state,
                 ],
             )
 
@@ -803,7 +948,6 @@ Answer: [expected answer]"""
 
         template = f"{{{column_name}}}"
         if current_prompt:
-            # Add space if needed
             if not current_prompt.endswith(" ") and not current_prompt.endswith("\n"):
                 return f"{current_prompt} {template}"
             else:
@@ -825,14 +969,12 @@ Answer: [expected answer]"""
         if not prompt or not prompt.strip():
             return False, "Base prompt cannot be empty"
 
-        # Extract template placeholders
         template_pattern = r"\{([^}]+)\}"
         placeholders = re.findall(template_pattern, prompt)
 
         if not placeholders:
             return False, "Prompt must contain at least one template placeholder in {column_name} format"
 
-        # Check if placeholders match available columns (excluding target)
         invalid_placeholders = []
         for placeholder in placeholders:
             if placeholder not in available_columns:
@@ -844,7 +986,6 @@ Answer: [expected answer]"""
                 f"Invalid template placeholders: {', '.join(invalid_placeholders)}. Available columns: {', '.join(available_columns)}",
             )
 
-        # Ensure target column is included in templates or prompt makes sense
         if target_column and target_column not in placeholders:
             logger.warning(f"Target column '{target_column}' is not included in prompt template")
 
@@ -866,6 +1007,8 @@ Answer: [expected answer]"""
         regexp_pattern: str,
         continuous_metric: str,
         preset_data_path: str,
+        dataset_size: Optional[float],
+        test_size: float,
     ) -> str:
         """Create a new prompt-based experiment using the /prompts endpoint.
 
@@ -886,20 +1029,16 @@ Answer: [expected answer]"""
         Returns:
             Status message
         """
-        # Validate experiment name
         is_valid, error = validate_experiment_name(name)
         if not is_valid:
             return f"Error: {error}"
 
-        # Validate max iterations
         is_valid, error = validate_max_iterations(max_iterations)
         if not is_valid:
             return f"Error: {error}"
 
-        # Ensure available_columns populated for presets by downloading CSV from MinIO if needed
         try:
             if (not available_columns) and preset_data_path:
-                # Use internal S3 URL to fetch CSV inside container
                 base = INTERNAL_S3_API_URL.rstrip("/")
                 bucket = STORAGE_BUCKET_NAME
                 url = f"{base}/{bucket}/{preset_data_path}"
@@ -917,15 +1056,12 @@ Answer: [expected answer]"""
                     except Exception:
                         pass
         except Exception:
-            # Best-effort; continue with possibly empty available_columns
             pass
 
-        # Validate prompt template
         is_valid, error = self._validate_prompt_template(base_prompt, available_columns, target_field)
         if not is_valid:
             return f"Error: {error}"
 
-        # Validate file upload unless preset data_path provided
         if not data_file and not preset_data_path:
             return "Error: Please upload a data file or choose a preset"
 
@@ -935,26 +1071,29 @@ Answer: [expected answer]"""
             if not is_valid:
                 return f"Error: {error}"
 
-        # Validate target field
         if not target_field:
             return "Error: Please select a target column"
 
-        # Validate regexp pattern when using regexp binary method
         if binary_validation_method == "regexp":
             is_valid, error = validate_regexp_pattern(regexp_pattern)
             if not is_valid:
                 return f"Error: {error}"
 
         try:
-            # Handle data file upload
             data_path = preset_data_path or ""
+            max_dataset_size = None
+
             if not data_path and data_file is not None:
                 src_path = extract_source_path_from_upload(data_file)
 
                 if src_path and os.path.exists(src_path):
                     filename = os.path.basename(src_path)
 
-                    # Upload file to S3 via Master API
+                    try:
+                        max_dataset_size = count_csv_rows(src_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to count rows in uploaded file {src_path}: {e}")
+
                     upload_result = self.exp_manager.upload_data_file(src_path, filename)
 
                     if "error" in upload_result:
@@ -964,8 +1103,62 @@ Answer: [expected answer]"""
                     cleanup_temp_file(src_path)
                 else:
                     return "Error: Uploaded file is not accessible"
+            elif preset_data_path:
+                try:
+                    base = INTERNAL_S3_API_URL.rstrip("/")
+                    bucket = STORAGE_BUCKET_NAME
+                    url = f"{base}/{bucket}/{preset_data_path}"
+                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                        tmp_path = tmp.name
+                    try:
+                        resp = requests.get(url, timeout=30)
+                        resp.raise_for_status()
+                        with open(tmp_path, "wb") as f:
+                            f.write(resp.content)
+                        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                            train_rows = count_csv_rows(tmp_path)
+                            if train_rows is not None and train_rows > 0:
+                                val_path = preset_data_path.replace("/train.csv", "/val.csv")
+                                total_rows = train_rows
+                                try:
+                                    val_url = f"{base}/{bucket}/{val_path}"
+                                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as val_tmp:
+                                        val_tmp_path = val_tmp.name
+                                    try:
+                                        val_resp = requests.get(val_url, timeout=30)
+                                        if val_resp.ok:
+                                            with open(val_tmp_path, "wb") as f:
+                                                f.write(val_resp.content)
+                                            val_rows = count_csv_rows(val_tmp_path)
+                                            if val_rows is not None and val_rows > 0:
+                                                total_rows = train_rows + val_rows
+                                    finally:
+                                        try:
+                                            if os.path.exists(val_tmp_path):
+                                                os.unlink(val_tmp_path)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                max_dataset_size = total_rows
+                    finally:
+                        try:
+                            if os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Failed to count rows for preset dataset {preset_data_path}: {e}")
 
-            # Create prompt experiment payload matching PromptExperimentCreate schema
+            if dataset_size is not None and dataset_size > 0:
+                dataset_size_int = int(dataset_size)
+                if max_dataset_size is not None and max_dataset_size > 0:
+                    min_size = max(1, int(max_dataset_size * 0.1))
+                    if dataset_size_int > max_dataset_size:
+                        return f"Error: Dataset size ({dataset_size_int}) exceeds maximum available ({max_dataset_size} rows). Please use a value between {min_size} and {max_dataset_size}."
+                    if dataset_size_int < min_size:
+                        return f"Error: Dataset size ({dataset_size_int}) is less than minimum required ({min_size} rows, 10% of dataset). Please use a value between {min_size} and {max_dataset_size}."
+
             validation_criteria = {
                 "validation_type": validation_type,
                 "binary_method": binary_validation_method,
@@ -985,7 +1178,11 @@ Answer: [expected answer]"""
                 "max_iterations": max_iterations,
             }
 
-            # Create prompt experiment using new endpoint
+            if dataset_size is not None and dataset_size > 0:
+                prompt_experiment_data["dataset_size"] = int(dataset_size)
+            if test_size is not None:
+                prompt_experiment_data["test_size"] = float(test_size)
+
             result = self.exp_manager.create_prompt_experiment(prompt_experiment_data)
 
             if "error" in result:

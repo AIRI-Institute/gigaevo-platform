@@ -121,7 +121,25 @@ class InstancesComponent(BaseComponent):
         ) = inputs
 
         # Refresh instances
-        refresh_instances_btn.click(self._get_instances_table, outputs=instances_df)
+        def refresh_list_and_selectors():
+            """Refresh instances table and update all selectors."""
+            updated_table = self._get_instances_table()
+            if updated_table is not None and len(updated_table) > 0:
+                instances = self.inst_manager.list_instances()
+                choices = build_instance_selector_choices(instances)
+            else:
+                choices = []
+            return (
+                updated_table,
+                gr.Dropdown(choices=choices, interactive=True),
+                gr.Dropdown(choices=choices, interactive=True),
+                gr.Dropdown(choices=choices, interactive=True),
+            )
+
+        refresh_instances_btn.click(
+            refresh_list_and_selectors,
+            outputs=[instances_df, instance_selector, detail_instance_selector, logs_instance_selector],
+        )
 
         # Initialize all instances
         def initialize_all_and_refresh():

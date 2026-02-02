@@ -34,8 +34,22 @@ if [ "$(id -u)" = "0" ]; then
         groupmod -g "$HOST_GID" gigaevouser 2>/dev/null || true
     fi
     
-    chown -R "$USER_TO_USE:$USER_TO_USE" /app/repos
-    chown -R "$USER_TO_USE:$USER_TO_USE" /app
+    # IMPORTANT:
+    # - In dev mode, some mounts are read-only (e.g. /app/master_api/src:ro).
+    # - Chowning the entire /app tree causes lots of errors and slows startup, which can break healthchecks.
+    # Only chown directories that must be writable by the runner.
+    # Prefer chowning only the configured clone path (can be large; avoid scanning the whole /app/repos).
+    CLONE_PATH="${GIGAVOLVE__CLONE_PATH:-/app/repos/gigaevo-core}"
+    if [ -n "$CLONE_PATH" ]; then
+        mkdir -p "$(dirname "$CLONE_PATH")" 2>/dev/null || true
+        mkdir -p "$CLONE_PATH" 2>/dev/null || true
+        # Avoid recursive chown on bind mounts (slow on macOS); just ensure dirs are owned.
+        chown "$USER_TO_USE:$USER_TO_USE" "$(dirname "$CLONE_PATH")" 2>/dev/null || true
+        chown "$USER_TO_USE:$USER_TO_USE" "$CLONE_PATH" 2>/dev/null || true
+    fi
+    chown -R "$USER_TO_USE:$USER_TO_USE" /tmp/gigavolve 2>/dev/null || true
+    chown -R "$USER_TO_USE:$USER_TO_USE" /tmp/problems 2>/dev/null || true
+    chown -R "$USER_TO_USE:$USER_TO_USE" /app/src 2>/dev/null || true
 
     # Switch to the user for the main application
     echo "Switching to $USER_TO_USE..."

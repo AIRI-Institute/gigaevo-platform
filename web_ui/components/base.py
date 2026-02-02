@@ -135,17 +135,20 @@ class BaseComponent(ABC):
             "dataset_path": data_file_path or "",
         }
 
+        # Normalize AutoML variants to their base task type for display
+        base_type = task_type.replace("_automl", "") if task_type.endswith("_automl") else task_type
+
         # Add task-specific fields
-        if task_type == "classification" and target_field:
+        if base_type == "classification" and target_field:
             spec["target_field"] = target_field
-        if task_type == "regression" and target_field:
+        if base_type == "regression" and target_field:
             spec["target_field"] = target_field
-        if task_type == "classification" and num_classes:
+        if base_type == "classification" and num_classes:
             try:
                 spec["n_classes"] = int(str(num_classes).strip())  # type: ignore
             except ValueError:
                 pass
-        if task_type == "clustering":
+        if base_type == "clustering":
             try:
                 spec["n_clusters"] = int(str(num_clusters).strip()) if num_clusters and str(num_clusters).strip() else 3  # type: ignore
             except ValueError:

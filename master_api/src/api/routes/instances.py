@@ -142,6 +142,8 @@ async def get_health_summary(service: RunnerInstanceService = Depends(get_instan
         elif instance.status == RunnerInstanceStatus.BUSY:
             summary["healthy_instances"] += 1
             summary["busy_instances"] += 1
+        elif instance.status in [RunnerInstanceStatus.ONLINE, RunnerInstanceStatus.INITIALIZING]:
+            summary["healthy_instances"] += 1
         elif instance.status == RunnerInstanceStatus.ERROR:
             summary["unhealthy_instances"] += 1
         elif instance.status == RunnerInstanceStatus.OFFLINE:

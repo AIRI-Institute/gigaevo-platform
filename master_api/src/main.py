@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from common.version import __version__
 from src.api.routes import examples, experiments, instances, results, status
 from src.config import load_config
 from src.services.service_manager import ServiceManager
@@ -21,7 +22,7 @@ _results_ingest_task = None
 app = FastAPI(
     title="GigaEvo Platform Master API",
     description="Master API for managing experiments and coordinating runners",
-    version="0.1.0",
+    version=__version__,
 )
 
 app.add_middleware(
@@ -48,7 +49,6 @@ async def debug_consumer():
         "kafka_enabled": False,
         "kafka_service_available": False,
         "workflow_consumer_available": False,
-        "deployment_consumer_available": False,
         "consumers_running": [],
     }
 
@@ -57,7 +57,6 @@ async def debug_consumer():
         debug_info["kafka_enabled"] = config.kafka.enabled
         debug_info["kafka_service_available"] = service_manager.kafka_service is not None
         debug_info["workflow_consumer_available"] = service_manager.workflow_consumer is not None
-        debug_info["deployment_consumer_available"] = service_manager.deployment_consumer is not None
 
         if service_manager.kafka_service:
             debug_info["consumers_running"] = list(service_manager.kafka_service.consumer_tasks.keys())

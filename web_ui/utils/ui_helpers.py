@@ -32,7 +32,12 @@ def update_dropdown_choices(
         # If we have a file, use its columns
         if file_path and file_columns:
             choices = file_columns
-            value = file_columns[0] if file_columns else None
+            # If preset_target is specified and exists in the file, use it
+            # Otherwise, fall back to first column
+            if preset_target and preset_target in file_columns:
+                value = preset_target
+            else:
+                value = file_columns[0] if file_columns else None
             return True, choices, value
 
         # If preset is active, use preset target

@@ -117,6 +117,38 @@ make restart SERVICE=kafka
 - **Kafka Broker**: localhost:9092
 - **Kafka UI**: Available in dev mode at http://localhost:9000 (via `make dev`)
 
+### Runner pool size configuration
+
+By default, the platform starts with a single runner instance. To run multiple experiments in parallel, increase the runner pool size:
+
+```bash
+# In .env file (or export before running make/deploy)
+RUNNER_POOL_SIZE=3    # Number of runner instances (default: 1)
+```
+
+The system automatically generates a `docker-compose.runner-pool.*.generated.yml` file with N runner services.
+
+### Runner pool instance controls (WebUI)
+
+The WebUI “Runner Instances” tab calls the Master API (`/api/v1/instances/*`) to start/stop/restart runners and fetch container logs.
+
+With a **Compose-managed runner pool** (`RUNNER__MANAGE_CONTAINERS=false`, the default in `make dev`/`make deploy`), Master controls the already-created `runner-api-N` containers via Docker.
+
+Requirements:
+
+- `master-api` has Docker access: mount `/var/run/docker.sock` (and ensure the container user can read/write it; otherwise run `master-api` as root or align the socket group).
+- Runner containers are started by Docker Compose (Master finds them via `com.docker.compose.service=runner-api-N` labels; set `COMPOSE_PROJECT_NAME` if you have multiple stacks with the same service names).
+
+Security note: mounting the Docker socket grants the `master-api` container root-equivalent control over the host Docker engine.
+
+Quick manual checks (requires the stack running):
+
+```bash
+bash ./smoke_runner_instances.sh status
+bash ./smoke_runner_instances.sh health
+bash ./smoke_runner_instances.sh logs runner-1 100
+```
+
 ## 📚 API Endpoints
 
 ### Master API (as per docs/api_endpoints.md)

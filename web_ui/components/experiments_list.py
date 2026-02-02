@@ -124,6 +124,11 @@ class ExperimentsListComponent(BaseComponent):
         if "error" in result:
             return self.handle_api_error(result, "starting experiment")
 
+        st = str(result.get("status") or "").lower()
+        if st in {"queued", "dispatching"}:
+            msg = result.get("status_message") or "Waiting for runner capacity"
+            return f"⏳ Experiment {experiment_id} queued: {msg}"
+
         return f"✅ Experiment {experiment_id} started successfully"
 
     def _stop_experiment(self, experiment_selector: str) -> str:

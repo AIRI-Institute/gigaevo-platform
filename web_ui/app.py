@@ -5,6 +5,7 @@ import gradio as gr
 from components import (
     CreateExperimentComponent,
     CreatePromptExperimentComponent,
+    CreateChainExperimentComponent,
     ExperimentDetailsComponent,
     ExperimentResultsComponent,
     ExperimentsListComponent,
@@ -30,6 +31,11 @@ def create_interface():
         status_service=status_service,
     )
     create_prompt_experiment_comp = CreatePromptExperimentComponent(
+        experiment_manager=exp_manager,
+        instance_manager=inst_manager,
+        status_service=status_service,
+    )
+    create_chain_experiment_comp = CreateChainExperimentComponent(
         experiment_manager=exp_manager,
         instance_manager=inst_manager,
         status_service=status_service,
@@ -71,27 +77,31 @@ def create_interface():
             with gr.Tab("Create Prompt Experiment"):
                 create_prompt_experiment_comp.build()
 
-            # Tab 2: Create Experiment
+            # Tab 2: Create Chain Experiment
+            with gr.Tab("Create Chain Experiment"):
+                create_chain_experiment_comp.build()
+
+            # Tab 3: Create Experiment
             with gr.Tab("Create ML Experiment"):
                 create_experiment_comp.build()
 
-            # Tab 3: Experiments List
+            # Tab 4: Experiments List
             with gr.Tab("Experiments"):
                 experiments_list_comp.build()
 
-            # Tab 4: Experiment Details and Visualization
+            # Tab 5: Experiment Details and Visualization
             with gr.Tab("Experiment Details and Visualization"):
                 experiment_details_comp.build()
 
-            # Tab 5: Experiment Results
+            # Tab 6: Experiment Results
             with gr.Tab("Experiment Results"):
                 experiment_results_comp.build()
 
-            # Tab 6: Runner Instances
+            # Tab 7: Runner Instances
             with gr.Tab("Runner Instances"):
                 instances_comp.build()
 
-            # Tab 7: System Status
+            # Tab 8: System Status
             with gr.Tab("System Status"):
                 system_status_comp.build()
 

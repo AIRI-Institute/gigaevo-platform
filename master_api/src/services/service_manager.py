@@ -9,7 +9,6 @@ from .database_service import DatabaseService
 from .experiment_creation_service import ExperimentCreationService
 from .experiment_service import ExperimentService
 from .kafka_service import KafkaService
-from .runner_deployment_consumer import RunnerDeploymentConsumer
 from .runner_instance_service import RunnerInstanceService
 from .status_service import StatusService
 from .storage_service import StorageService
@@ -35,7 +34,6 @@ class ServiceManager:
 
         # Consumer services
         self.workflow_consumer: Optional[WorkflowConsumer] = None
-        self.deployment_consumer: Optional[RunnerDeploymentConsumer] = None
 
         self._initialized = False
 
@@ -105,9 +103,10 @@ class ServiceManager:
         self.instance_service = RunnerInstanceService(self.db_service, self.config)
         await self.instance_service.initialize()
 
-        # Initialize RunnerAPI instances if auto-initialization is enabled
-        if self.config.runner.auto_initialize:
-            logger.info("Auto-initializing RunnerAPI instances...")
+        # Initialize RunnerAPI containers only if Master is responsible for container lifecycle.
+        # In Compose mode, runners are started by Compose and Master only monitors/allocates.
+        if getattr(self.config.runner, "manage_containers", True):
+            logger.info("Initializing RunnerAPI containers (Master-managed lifecycle)...")
             init_results = await self.instance_service.initialize_all_instances()
 
             successful_count = sum(1 for success in init_results.values() if success)
@@ -119,6 +118,8 @@ class ServiceManager:
                     logger.info(f"✓ {instance_id}: initialized successfully")
                 else:
                     logger.error(f"✗ {instance_id}: initialization failed")
+        else:
+            logger.info("Runner containers are Compose-managed; skipping docker-run initialization")
 
         # Status service
         self.status_service = StatusService(service_manager=self)
@@ -137,7 +138,6 @@ class ServiceManager:
             storage_service=self.storage_service,
             kafka_service=self.kafka_service,
             workflow_consumer=self.workflow_consumer,
-            deployment_consumer=self.deployment_consumer,
             instance_service=self.instance_service,
             config=self.config,
         )
@@ -173,32 +173,11 @@ class ServiceManager:
             logger.error(f"Workflow consumer traceback: {traceback.format_exc()}")
             raise
 
-        # Deployment consumer
-        try:
-            logger.info("Creating deployment consumer...")
-            self.deployment_consumer = RunnerDeploymentConsumer(self.config)
-            logger.info("Deployment consumer created, initializing...")
-            await self.deployment_consumer.initialize(self.workflow_consumer)
-            logger.info("Deployment consumer initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize deployment consumer: {e}")
-            import traceback
-
-            logger.error(f"Deployment consumer traceback: {traceback.format_exc()}")
-            raise
-
     async def cleanup(self):
         """Cleanup all services in reverse order"""
         logger.info("Starting ServiceManager cleanup...")
 
         # Cleanup consumers first
-        if self.deployment_consumer:
-            try:
-                await self.deployment_consumer.cleanup()
-                logger.info("Deployment consumer cleaned up")
-            except Exception as e:
-                logger.error(f"Error cleaning up deployment consumer: {e}")
-
         if self.workflow_consumer:
             try:
                 await self.workflow_consumer.cleanup()
@@ -270,9 +249,6 @@ class ServiceManager:
         if self.config.kafka.enabled:
             health_status["services"]["workflow_consumer"] = (
                 "configured" if self.workflow_consumer else "not_initialized"
-            )
-            health_status["services"]["deployment_consumer"] = (
-                "configured" if self.deployment_consumer else "not_initialized"
             )
 
         return health_status

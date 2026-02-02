@@ -82,6 +82,7 @@ services:
   # Redis for caching and task coordination
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--databases", "${REDIS_DATABASES:-16}"]
     ports:
       - "6379:6379"
     volumes:
@@ -97,6 +98,7 @@ services:
   # Redis for GigaEvolve experiments
   redis-gigavolve:
     image: redis:7-alpine
+    command: ["redis-server", "--databases", "${REDIS_DATABASES:-16}"]
     ports:
       - "6380:6379"
     volumes:

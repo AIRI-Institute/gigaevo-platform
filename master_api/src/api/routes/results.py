@@ -54,25 +54,37 @@ async def get_visual_result_image(experiment_id: str):
 
 @router.get("/results/{experiment_id}/metrics_plot.png")
 async def get_metrics_plot_image(experiment_id: str):
-    """Serve metrics plot PNG for the experiment, generating if missing."""
+    """Serve metrics plot PNG for the experiment, generating/updating with real metrics."""
     # Use system temporary directory instead of /app
     base_dir = tempfile.gettempdir()
     exp_dir = os.path.join(base_dir, f"gigaevo_experiments_{experiment_id}")
     os.makedirs(exp_dir, exist_ok=True)
     image_path = os.path.join(exp_dir, "metrics_plot.png")
 
-    if not os.path.exists(image_path):
-        if not _service_manager:
-            return FileResponse(image_path, media_type="image/png")
-        vis = VisualizationService(_service_manager.get_storage_service())
-        db = _service_manager.get_db_service()
-        exp_model = await db.get_experiment(experiment_id)
-        import time as _t
+    if not _service_manager:
+        return FileResponse(image_path, media_type="image/png")
 
-        seconds = 0
-        if exp_model and exp_model.started_at:
-            seconds = int(max(0, _t.time() - exp_model.started_at.timestamp()))
-        await vis.generate_and_store(experiment_id, metrics={"metric": 1.0}, seconds_since_start=seconds)
+    vis = VisualizationService(_service_manager.get_storage_service())
+    db = _service_manager.get_db_service()
+    exp_model = await db.get_experiment(experiment_id)
+    import time as _t
+
+    seconds = 0
+    if exp_model and exp_model.started_at:
+        seconds = int(max(0, _t.time() - exp_model.started_at.timestamp()))
+
+    # Get real metrics from experiment model
+    metrics = {}
+    if exp_model and exp_model.metrics:
+        # Convert metrics dict to float values for visualization
+        metrics = {k: float(v) for k, v in exp_model.metrics.items() if isinstance(v, (int, float))}
+
+    # If no metrics available, use default
+    if not metrics:
+        metrics = {"metric": 1.0}
+
+    # Always regenerate to keep plot up-to-date (or check file age for optimization)
+    await vis.generate_and_store(experiment_id, metrics=metrics, seconds_since_start=seconds)
 
     return FileResponse(image_path, media_type="image/png", headers={"Cache-Control": "no-store"})
 

@@ -24,10 +24,12 @@ class InstanceStatus(str, Enum):
     DISABLED = "disabled"
     NOT_CONFIGURED = "not_configured"
     ONLINE = "online"
+    INITIALIZING = "initializing"
     READY = "ready"
     OFFLINE = "offline"
     ERROR = "error"
     BUSY = "busy"
+    TERMINATING = "terminating"
     NO_INSTANCES = "no_instances"
     UNKNOWN = "unknown"
 

@@ -129,14 +129,11 @@ class WorkflowConsumer:
                     result={"storage_path": storage_path},
                 )
 
-                # Update experiment's data_path with storage base path for runner deployment
+                # Update experiment's data_path with storage base path for prepared files
                 await self.db_service.update_experiment(experiment_id, data_path=storage_path)
 
                 # Update experiment status
                 await self.db_service.update_experiment_status(experiment_id, "prepared")
-
-                # Publish experiment prepared event
-                await self._publish_experiment_prepared(experiment_id, storage_path)
 
                 logger.info(f"Successfully processed experiment config for {experiment_id}")
 
@@ -150,7 +147,7 @@ class WorkflowConsumer:
                 )
 
                 await self.db_service.update_experiment_status(
-                    experiment_id, "failed", error_message="Failed to create experiment files"
+                    experiment_id, "preparation_failed", error_message="Failed to create experiment files"
                 )
 
                 logger.error(f"Failed to create experiment files for {experiment_id}")
@@ -160,128 +157,10 @@ class WorkflowConsumer:
 
             # Update experiment status to failed
             try:
-                await self.db_service.update_experiment_status(experiment_id, "failed", error_message=str(e))
+                await self.db_service.update_experiment_status(
+                    experiment_id, "preparation_failed", error_message=str(e)
+                )
             except Exception as db_error:
                 logger.error(f"Failed to update experiment status: {db_error}")
 
-    async def _publish_experiment_prepared(self, experiment_id: str, storage_path: str):
-        """Publish experiment prepared event to Kafka"""
-        if not self.kafka_service:
-            logger.debug("Kafka not available, skipping experiment prepared message")
-            return
-
-        try:
-            message = {
-                "experiment_id": experiment_id,
-                "storage_path": storage_path,
-                "status": "prepared",
-                "timestamp": datetime.now(tz=self.config.timezone).isoformat(),
-            }
-
-            await self.kafka_service.send_message(
-                self.config.kafka.topics["experiment_prepared"], message, key=experiment_id
-            )
-
-            logger.info(f"Published experiment prepared event for {experiment_id}")
-
-        except Exception as e:
-            logger.error(f"Failed to publish experiment prepared event for {experiment_id}: {e}")
-
-    async def handle_runner_deployment(self, experiment_id: str, runner_id: str) -> bool:
-        """Handle deployment of experiment files to a specific runner"""
-        try:
-            logger.info(f"Deploying experiment {experiment_id} to runner {runner_id}")
-
-            # Get experiment details
-            experiment = await self.db_service.get_experiment(experiment_id)
-            if not experiment:
-                logger.error(f"Experiment {experiment_id} not found")
-                return False
-
-            # Get the storage base path for experiment files
-            # (Now stored in the experiment's data_path after file creation)
-            storage_base_path = experiment.data_path
-            if not storage_base_path:
-                logger.error(f"No files available for experiment {experiment_id}")
-                return False
-
-            # Create deployment task
-            task = await self.db_service.create_task(experiment_id, "deploy_to_runner")
-
-            # Store deployment data in result field
-            await self.db_service.update_task(
-                str(task.id), result={"runner_id": runner_id, "storage_base_path": storage_base_path}
-            )
-
-            # Update task status
-            await self.db_service.update_task(
-                str(task.id), status="running", started_at=datetime.now(tz=self.config.timezone)
-            )
-
-            # For folder structure, we need to provide the base path for the runner to download
-            # The runner will need to handle downloading multiple files from the folder
-            deployment_info = {
-                "experiment_id": experiment_id,
-                "storage_base_path": storage_base_path,
-                "source": "master_api",
-                "is_folder_structure": True,
-            }
-
-            # Send deployment request to runner API with folder info instead of single download URL
-            success = await self._send_deployment_request(runner_id, deployment_info)
-
-            if success:
-                # Update task status
-                await self.db_service.update_task(
-                    str(task.id),
-                    status="completed",
-                    completed_at=datetime.now(tz=self.config.timezone),
-                    result={"runner_id": runner_id, "storage_base_path": storage_base_path},
-                )
-
-                # Update experiment status
-                await self.db_service.update_experiment_status(experiment_id, "deployed")
-
-                logger.info(f"Successfully deployed experiment {experiment_id} to runner {runner_id}")
-                return True
-            else:
-                await self.db_service.update_task(
-                    str(task.id),
-                    status="failed",
-                    completed_at=datetime.now(tz=self.config.timezone),
-                    error_message="Failed to deploy to runner",
-                )
-                return False
-
-        except Exception as e:
-            logger.error(f"Error deploying experiment {experiment_id} to runner {runner_id}: {e}")
-            return False
-
-    async def _send_deployment_request(self, runner_id: str, deployment_info: dict) -> bool:
-        """Send deployment request to runner API"""
-        try:
-            import httpx
-
-            # Get runner instance details
-            runner = await self.db_service.get_runner(runner_id)
-            if not runner:
-                logger.error(f"Runner {runner_id} not found in database")
-                return False
-
-            # Prepare deployment request
-            deployment_url = f"{runner.endpoint_url}/api/v1/experiments/deploy"
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(deployment_url, json=deployment_info)
-
-                if response.status_code == 200:
-                    logger.info(f"Deployment request successful for runner {runner_id}")
-                    return True
-                else:
-                    logger.error(f"Deployment request failed for runner {runner_id}: {response.status_code}")
-                    logger.error(f"Response: {response.text}")
-                    return False
-
-        except Exception as e:
-            logger.error(f"Error sending deployment request to runner {runner_id}: {e}")
-            return False
+    # NOTE: Legacy Kafka-driven deployment helpers removed.

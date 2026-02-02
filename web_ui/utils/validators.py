@@ -146,6 +146,8 @@ def validate_task_type(task_type: str) -> Tuple[bool, Optional[str]]:
     Returns:
         Tuple of (is_valid, error_message)
     """
+    # UI exposes only base task types; internal variants like *_automl or
+    # *_catboost are derived later and validated separately.
     valid_types = ["classification", "regression", "clustering"]
 
     if not task_type:
@@ -178,12 +180,15 @@ def validate_experiment_config(
     if not is_valid:
         errors.append(error)
 
+    # Normalize AutoML variants to their base task type for validation
+    base_type = task_type.replace("_automl", "") if task_type.endswith("_automl") else task_type
+
     # Task-specific validation
-    if task_type == "regression":
+    if base_type == "regression":
         if not target_field:
             errors.append("Target column is required for regression tasks")
 
-    elif task_type == "classification":
+    elif base_type == "classification":
         has_target = bool(target_field and target_field.strip())
         has_classes = bool(num_classes and num_classes.strip())
 
@@ -196,7 +201,7 @@ def validate_experiment_config(
             if not is_valid:
                 errors.append(error)
 
-    elif task_type == "clustering":
+    elif base_type == "clustering":
         # Clustering doesn't require target field
         pass
 

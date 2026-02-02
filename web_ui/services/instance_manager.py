@@ -63,7 +63,11 @@ class InstanceManager:
         """
         try:
             response = requests.post(f"{self.base_url}/api/v1/instances/{instance_id}/initialize", timeout=self.timeout)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(
+                    f"Failed to initialize instance {instance_id}: {response.status_code} {response.text.strip()}"
+                )
+                return {"error": f"{response.status_code}: {response.text.strip()}"}
             return response.json()
 
         except requests.RequestException as e:
@@ -78,7 +82,9 @@ class InstanceManager:
         """
         try:
             response = requests.post(f"{self.base_url}/api/v1/instances/initialize-all", timeout=self.timeout)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(f"Failed to initialize all instances: {response.status_code} {response.text.strip()}")
+                return {"error": f"{response.status_code}: {response.text.strip()}"}
             return response.json()
 
         except requests.RequestException as e:
@@ -96,7 +102,9 @@ class InstanceManager:
         """
         try:
             response = requests.post(f"{self.base_url}/api/v1/instances/{instance_id}/stop", timeout=self.timeout)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(f"Failed to stop instance {instance_id}: {response.status_code} {response.text.strip()}")
+                return {"error": f"{response.status_code}: {response.text.strip()}"}
             return response.json()
 
         except requests.RequestException as e:
@@ -114,7 +122,11 @@ class InstanceManager:
         """
         try:
             response = requests.post(f"{self.base_url}/api/v1/instances/{instance_id}/restart", timeout=self.timeout)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(
+                    f"Failed to restart instance {instance_id}: {response.status_code} {response.text.strip()}"
+                )
+                return {"error": f"{response.status_code}: {response.text.strip()}"}
             return response.json()
 
         except requests.RequestException as e:
@@ -135,7 +147,11 @@ class InstanceManager:
             response = requests.get(
                 f"{self.base_url}/api/v1/instances/{instance_id}/logs?lines={lines}", timeout=self.timeout
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(
+                    f"Failed to get logs for instance {instance_id}: {response.status_code} {response.text.strip()}"
+                )
+                return {"error": f"{response.status_code}: {response.text.strip()}"}
             return response.json()
 
         except requests.RequestException as e:
@@ -165,7 +181,9 @@ class InstanceManager:
         """
         try:
             response = requests.get(f"{self.base_url}/api/v1/instances/health/summary", timeout=self.timeout)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(f"Failed to get health summary: {response.status_code} {response.text.strip()}")
+                return {"error": f"{response.status_code}: {response.text.strip()}"}
             return response.json()
 
         except requests.RequestException as e:

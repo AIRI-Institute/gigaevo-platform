@@ -59,7 +59,9 @@ services:
       - STORAGE__ACCESS_KEY=minioadmin
       - STORAGE__SECRET_KEY=minioadmin
       - REDIS_URL=redis://redis:6379/0
-      - RUNNER__BASE_URL=http://runner-api:8001
+      - RUNNER__POOL_SIZE=${RUNNER_POOL_SIZE:-1}
+      - RUNNER__POOL_HOST_PREFIX=runner-api-
+      - RUNNER__MANAGE_CONTAINERS=false
     ports:
       - "8000:8000"
     depends_on:
@@ -72,7 +74,7 @@ services:
     volumes:
       - input_data:/app/input_data
       - ./llm_models.yml:/llm_models.yml:ro
-      healthcheck:
+    healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
@@ -90,6 +92,7 @@ services:
       - STORAGE__ENDPOINT_URL=http://minio:9000
       - STORAGE__ACCESS_KEY=minioadmin
       - STORAGE__SECRET_KEY=minioadmin
+      - GIGAVOLVE__CLONE_PATH=/tmp/gigavolve/gigaevo-core
     ports:
       - "8001:8001"
     depends_on:
@@ -101,7 +104,7 @@ services:
       - gigavolve_cache:/tmp/gigavolve
       - input_data:/app/input_data
       - ./llm_models.yml:/llm_models.yml:ro
-      healthcheck:
+    healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
@@ -122,7 +125,7 @@ services:
     volumes:
       - input_data:/app/input_data
       - ./llm_models.yml:/llm_models.yml:ro
-      healthcheck:
+    healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7860"]
       interval: 30s
       timeout: 10s

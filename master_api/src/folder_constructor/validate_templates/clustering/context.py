@@ -13,14 +13,27 @@ TARGET_COLUMN = "${target_field}"
 
 
 def build_context(
-    test_size: float = 0.2,
+    test_size: Optional[float] = None,
     random_state: int = 42,
     features: Optional[list[str]] = None,
     drop_na: bool = True,
+    dataset_size: Optional[int] = None,
 ) -> dict[str, np.ndarray]:
+    # Read parameters from environment variables if not provided
+    if test_size is None:
+        test_size = float(os.getenv("TEST_SIZE", "0.2"))
+    if dataset_size is None:
+        env_size = os.getenv("DATASET_SIZE")
+        if env_size:
+            dataset_size = int(env_size)
+    
     df = pd.read_csv(DATASET_PATH)
     if drop_na:
         df = df.dropna()
+    
+    # Limit dataset size if specified
+    if dataset_size is not None and dataset_size > 0 and len(df) > dataset_size:
+        df = df.head(dataset_size)
 
     if features is not None:
         X_df = df[features]

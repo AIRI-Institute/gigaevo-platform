@@ -122,7 +122,7 @@ make restart SERVICE=kafka
 By default, the platform starts with a single runner instance. To run multiple experiments in parallel, increase the runner pool size:
 
 ```bash
-# In .env file (or export before running make/deploy)
+# In .env file (or export before running `make deploy`)
 RUNNER_POOL_SIZE=3    # Number of runner instances (default: 1)
 ```
 

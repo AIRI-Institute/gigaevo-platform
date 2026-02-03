@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,18 @@ from redis.asyncio import Redis
 from ..config import load_config
 
 logger = logging.getLogger(__name__)
+
+
+REPO_EXTRA_PIP_PACKAGES = [
+    "scikit-learn",
+    "lightautoml",
+    "catboost",
+    "evaluate",
+    "rouge_score",
+    "bert_score",
+    "mmar-carl>=0.0.13",
+    "httpx>=0.25.0",
+]
 
 
 def _extract_prompt_template(program_code: str) -> Optional[str]:
@@ -405,11 +418,36 @@ class GigaEvolveService:
             venv_pip = venv_dir / "bin" / "pip"
             deps_marker = venv_dir / ".deps_installed"
 
-            # Fast-path: if venv already exists and deps marker is present, don't reinstall.
+            def _deps_fingerprint() -> Optional[str]:
+                """Quick fingerprint for requirements + our extra dependencies."""
+                spec_bytes: Optional[bytes] = None
+                if pyproject.exists():
+                    spec_bytes = pyproject.read_bytes()
+                elif requirements.exists():
+                    spec_bytes = requirements.read_bytes()
+                else:
+                    return None
+
+                h = hashlib.sha256()
+                h.update(spec_bytes)
+                h.update(b"\n--extra--\n")
+                h.update("\n".join(REPO_EXTRA_PIP_PACKAGES).encode("utf-8"))
+                return h.hexdigest()
+
+            # Reuse venv only if marker fingerprint matches current deps spec.
             if venv_python.exists() and venv_pip.exists() and deps_marker.exists():
-                self.config.python_path = str(venv_python)
-                logger.info(f"Reusing existing repo venv (deps marker present) at {venv_dir}")
-                return True
+                expected_fp = _deps_fingerprint()
+                if expected_fp:
+                    try:
+                        marker_obj = json.loads(deps_marker.read_text(encoding="utf-8"))
+                        marker_fp = marker_obj.get("fingerprint")
+                    except Exception:
+                        marker_fp = None
+
+                    if marker_fp == expected_fp:
+                        self.config.python_path = str(venv_python)
+                        logger.info(f"Reusing existing repo venv (deps marker matches) at {venv_dir}")
+                        return True
 
             # Create venv only if missing (re-creating it will blow away deps and cause churn).
             if not venv_python.exists() or not venv_pip.exists():
@@ -425,18 +463,7 @@ class GigaEvolveService:
                 # Install project (non-editable to minimize file churn)
                 subprocess.run([str(venv_pip), "install", "."], cwd=str(clone_path), check=True, text=True)
                 subprocess.run(
-                    [
-                        str(venv_pip),
-                        "install",
-                        "scikit-learn",
-                        "lightautoml",
-                        "catboost",
-                        "evaluate",
-                        "rouge_score",
-                        "bert_score",
-                        "mmar-carl>=0.0.13",
-                        "httpx>=0.25.0",
-                    ],
+                    [str(venv_pip), "install", *REPO_EXTRA_PIP_PACKAGES],
                     cwd=str(clone_path),
                     check=True,
                     text=True,
@@ -446,19 +473,30 @@ class GigaEvolveService:
                 subprocess.run(
                     [str(venv_pip), "install", "-r", "requirements.txt"], cwd=str(clone_path), check=True, text=True
                 )
+                subprocess.run(
+                    [str(venv_pip), "install", *REPO_EXTRA_PIP_PACKAGES],
+                    cwd=str(clone_path),
+                    check=True,
+                    text=True,
+                )
                 logger.info("Installed repo requirements into dedicated venv")
             else:
                 logger.info("No pyproject.toml or requirements.txt found; skipping dependency install")
                 return False
 
-            # Mark venv as ready (used by /health gating on the master side).
-            try:
-                deps_marker.write_text("ok\n", encoding="utf-8")
-                logger.info(f"Created deps marker at {deps_marker}")
-            except Exception as e:
-                # Marker is best-effort; if it fails, log a warning but still treat deps as installed.
-                # Returning False here causes runners to stay in 'initializing' even though installs succeeded.
-                logger.warning(f"Failed to write deps marker at {deps_marker}: {e}")
+            # Strict verification: ensure all installed requirements are consistent.
+            subprocess.run([str(venv_python), "-m", "pip", "check"], cwd=str(clone_path), check=True, text=True)
+
+            # Write a minimal "cached proof" marker atomically: fingerprint + schema.
+            fp = _deps_fingerprint()
+            if not fp:
+                logger.warning("Failed to compute deps fingerprint; refusing to mark deps as installed")
+                return False
+            payload = {"schema": 1, "fingerprint": fp}
+            tmp = deps_marker.with_suffix(deps_marker.suffix + ".tmp")
+            tmp.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+            os.replace(tmp, deps_marker)
+            logger.info(f"Wrote deps marker at {deps_marker}")
 
             # Point service to use the venv's python for running experiments
             self.config.python_path = str(venv_python)
@@ -475,12 +513,9 @@ class GigaEvolveService:
     def is_repository_ready(self) -> bool:
         """Check if the repository is ready for use.
 
-        Historically we relied on a deps marker file (<clone_path>/.venv/.deps_installed)
-        to decide whether dependencies were installed. In practice, failures to create
-        this marker caused runners to remain in 'initializing' even when installs
-        actually succeeded. To make runner health more robust, we now treat the
-        presence of a functional venv as sufficient, and recreate the marker on the fly
-        if it's missing.
+        We rely on a small "cached proof" marker written only after a
+        successful install + `pip check`, and validate it against a fingerprint of the
+        current dependency spec.
         """
         try:
             clone_path = Path(self.config.clone_path).resolve()
@@ -490,25 +525,41 @@ class GigaEvolveService:
             # Check if it's a git repository
             git_dir = clone_path / ".git"
             if git_dir.exists():
-                # Require repo-local venv to exist; marker is best-effort.
+                pyproject = clone_path / "pyproject.toml"
+                requirements = clone_path / "requirements.txt"
+
                 venv_dir = clone_path / ".venv"
                 venv_python = venv_dir / "bin" / "python"
                 venv_pip = venv_dir / "bin" / "pip"
                 deps_marker = venv_dir / ".deps_installed"
 
-                # If venv is missing, repo is not ready.
-                if not (venv_python.exists() and venv_pip.exists()):
-                    logger.debug(f"Repository venv not ready at {venv_dir}")
+                if not (venv_python.exists() and venv_pip.exists() and deps_marker.exists()):
                     return False
 
-                # If marker is missing but venv exists, recreate it best-effort.
-                if not deps_marker.exists():
-                    try:
-                        deps_marker.write_text("ok\n", encoding="utf-8")
-                        logger.info(f"Recreated missing deps marker at {deps_marker}")
-                    except Exception as e:
-                        # Do not fail readiness solely because marker write failed.
-                        logger.debug(f"Failed to recreate deps marker at {deps_marker}: {e}")
+                def _expected_fingerprint() -> Optional[str]:
+                    spec_bytes: Optional[bytes] = None
+                    if pyproject.exists():
+                        spec_bytes = pyproject.read_bytes()
+                    elif requirements.exists():
+                        spec_bytes = requirements.read_bytes()
+                    else:
+                        return None
+
+                    h = hashlib.sha256()
+                    h.update(spec_bytes)
+                    h.update(b"\n--extra--\n")
+                    h.update("\n".join(REPO_EXTRA_PIP_PACKAGES).encode("utf-8"))
+                    return h.hexdigest()
+
+                try:
+                    marker_obj = json.loads(deps_marker.read_text(encoding="utf-8"))
+                    marker_fp = marker_obj.get("fingerprint")
+                except Exception:
+                    return False
+
+                expected_fp = _expected_fingerprint()
+                if not expected_fp or marker_fp != expected_fp:
+                    return False
 
                 # Check if we can run git commands as a final sanity check.
                 try:

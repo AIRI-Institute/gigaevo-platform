@@ -224,6 +224,47 @@ class ExperimentManager:
             logger.error(f"Failed to create chain experiment: {e}")
             return {"error": str(e)}
 
+    def create_carl_chain_experiment(
+        self,
+        carl_experiment_data: Dict[str, Any],
+        python_code: Optional[str] = None,
+        enable_feedback: Optional[bool] = None,
+        feedback_template: Optional[str] = None,
+        enable_memory: Optional[bool] = None,
+        memory_namespace: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a new CARL chain experiment (typed CARL steps).
+
+        Args:
+            carl_experiment_data: Experiment data (name, description, target_column, base_chain_config, etc.)
+            python_code: Optional custom Python code for TOOL steps (saved as custom_tools.py)
+            enable_feedback: Optional flag to enable chain execution feedback generation
+            feedback_template: Optional feedback template style ('detailed', 'summary', or 'errors_only')
+            enable_memory: Optional flag to enable memory retrieval during evolution
+            memory_namespace: Optional shared memory namespace override
+        """
+        try:
+            # Include optional parameters in the payload
+            payload = dict(carl_experiment_data)
+            if python_code and python_code.strip():
+                payload["python_code"] = python_code.strip()
+            if enable_feedback is not None:
+                payload["enable_feedback"] = enable_feedback
+            if feedback_template is not None:
+                payload["feedback_template"] = feedback_template
+            if enable_memory is not None:
+                payload["enable_memory"] = enable_memory
+            if memory_namespace is not None and str(memory_namespace).strip():
+                payload["memory_namespace"] = str(memory_namespace).strip()
+            response = requests.post(
+                f"{self.base_url}/api/v1/experiments/carl-chains", json=payload, timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Failed to create CARL chain experiment: {e}")
+            return {"error": str(e)}
+
     def drop_all_experiments(self) -> Dict[str, Any]:
         """Drop all experiments and their data.
 
@@ -433,6 +474,14 @@ class ExperimentManager:
                     "total_programs_complete": None,
                     "best_fitness": None,
                     "best_generations": None,
+                    "token_usage": {
+                        "totals": {
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "total_tokens": None,
+                        },
+                        "models": [],
+                    },
                 }
 
         except requests.RequestException as e:
@@ -443,6 +492,14 @@ class ExperimentManager:
                 "total_programs_complete": None,
                 "best_fitness": None,
                 "best_generations": None,
+                "token_usage": {
+                    "totals": {
+                        "prompt_tokens": None,
+                        "completion_tokens": None,
+                        "total_tokens": None,
+                    },
+                    "models": [],
+                },
             }
 
     def get_evolution_report(self, experiment_id: str) -> Optional[Dict[str, Any]]:
@@ -491,6 +548,54 @@ class ExperimentManager:
 
         except requests.RequestException as e:
             logger.error(f"Failed to get download archive {experiment_id}: {e}")
+            return None
+
+    def get_best_chain_config(self, experiment_id: str) -> Optional[Dict[str, Any]]:
+        """Get best (evolved) chain configuration for a chain experiment.
+
+        Args:
+            experiment_id: ID of the experiment
+
+        Returns:
+            Chain config dictionary or None if not found / not a chain experiment
+        """
+        try:
+            import time
+
+            ts = int(time.time())
+            url = f"{self.base_url}/results/{experiment_id}/best_chain_config.json?ts={ts}"
+            response = requests.get(url, timeout=self.timeout)
+
+            if response.ok:
+                return response.json()
+            return None
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to get best chain config {experiment_id}: {e}")
+            return None
+
+    def get_initial_chain_config(self, experiment_id: str) -> Optional[Dict[str, Any]]:
+        """Get initial (pre-evolution) chain configuration for a chain experiment.
+
+        Args:
+            experiment_id: ID of the experiment
+
+        Returns:
+            Chain config dictionary or None if not found / not a chain experiment
+        """
+        try:
+            import time
+
+            ts = int(time.time())
+            url = f"{self.base_url}/results/{experiment_id}/initial_chain_config.json?ts={ts}"
+            response = requests.get(url, timeout=self.timeout)
+
+            if response.ok:
+                return response.json()
+            return None
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to get initial chain config {experiment_id}: {e}")
             return None
 
     # Prompt presets API
@@ -560,4 +665,102 @@ class ExperimentManager:
             return response.json()
         except requests.RequestException as e:
             logger.error(f"Failed to get local prompt preset {name}: {e}")
+            return None
+
+    def get_chain_feedback(
+        self,
+        experiment_id: str,
+        iteration: Optional[int] = None,
+        feedback_template: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Get chain feedback for an experiment.
+
+        Args:
+            experiment_id: ID of the experiment
+            iteration: Iteration number (None for latest)
+            feedback_template: Requested template variant (informational, included in response)
+
+        Returns:
+            Feedback data dictionary with keys: experiment_id, iteration, feedback, feedback_length, has_feedback
+        """
+        try:
+            import time
+
+            ts = int(time.time())
+            url = f"{self.base_url}/results/{experiment_id}/feedback?ts={ts}"
+            if iteration is not None:
+                url += f"&iteration={iteration}"
+            if feedback_template:
+                url += f"&feedback_template={feedback_template}"
+
+            response = requests.get(url, timeout=self.timeout)
+
+            if response.ok:
+                data = response.json()
+                # Attach requested template for UI display
+                if feedback_template and "feedback_template" not in data:
+                    data["feedback_template"] = feedback_template
+                return data
+            return None
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to get chain feedback for {experiment_id}: {e}")
+            return None
+
+    def upload_to_memory(self, experiment_id: str) -> Dict[str, Any]:
+        """Trigger Ideas Tracker to upload experiment results to Memory Platform.
+
+        Args:
+            experiment_id: ID of the experiment
+
+        Returns:
+            Result dictionary with upload status
+        """
+        try:
+            timeout = max(int(DEFAULT_TIMEOUTS.get("experiment_results", 120)), 660)
+            response = requests.post(
+                f"{self.base_url}/results/{experiment_id}/upload_to_memory",
+                timeout=timeout,
+            )
+            if response.ok:
+                return response.json()
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = {"error": response.text[:300]}
+            if not isinstance(error_data, dict):
+                error_data = {"error": str(error_data)}
+            return {"error": error_data.get("detail") or error_data.get("error") or f"HTTP {response.status_code}"}
+        except requests.exceptions.Timeout:
+            return {"error": "Upload timed out. The Ideas Tracker may still be running on the server."}
+        except requests.RequestException as e:
+            logger.error(f"Failed to upload experiment {experiment_id} to memory: {e}")
+            return {"error": str(e)}
+
+    def get_validation_debug(self, experiment_id: str, iteration: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Get validation debug log for an experiment.
+
+        Args:
+            experiment_id: ID of the experiment
+            iteration: Iteration number (None for latest)
+
+        Returns:
+            Debug log data dictionary with keys: experiment_id, iteration, debug_log, debug_log_length
+        """
+        try:
+            import time
+
+            ts = int(time.time())
+            url = f"{self.base_url}/results/{experiment_id}/validation_debug?ts={ts}"
+            if iteration is not None:
+                url += f"&iteration={iteration}"
+
+            response = requests.get(url, timeout=self.timeout)
+
+            if response.ok:
+                return response.json()
+            return None
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to get validation debug for {experiment_id}: {e}")
             return None

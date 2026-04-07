@@ -124,6 +124,10 @@ class RunnerInstanceService:
                 "PORT": "8001",
             }
 
+            memory_api_url = str(getattr(self.config, "memory_api_url", "") or "").strip()
+            if memory_api_url:
+                env_vars["MEMORY_API_URL"] = memory_api_url
+
             # Add Kafka config if enabled
             if self.config.kafka.enabled:
                 env_vars.update(
@@ -582,7 +586,7 @@ class RunnerInstanceService:
         grace = max(0, grace)
         max_404s = int(getattr(self.config.runner, "status_404_release_threshold", 2) or 2)
         max_404s = max(1, max_404s)
-        terminal_statuses = {"completed", "failed", "cancelled"}
+        terminal_statuses = {"completed", "failed", "terminated", "cancelled"}
 
         logger.info(f"Starting runner pool reconciler loop (interval={interval}s)")
         while True:

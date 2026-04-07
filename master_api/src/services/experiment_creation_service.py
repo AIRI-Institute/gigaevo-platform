@@ -13,8 +13,8 @@ import pandas as pd
 from loguru import logger
 
 from ..config import load_config
-from ..folder_constructor.prompt_experiment_builder import build_prompt_experiment
 from ..folder_constructor.chain_experiment_builder import build_chain_experiment
+from ..folder_constructor.prompt_experiment_builder import build_prompt_experiment
 from ..folder_constructor.uuid_experiment_builder import build_uuid_experiment
 from ..services.database_service import DatabaseService
 from ..services.storage_service import StorageService
@@ -161,14 +161,242 @@ class ExperimentCreationService:
             if data_path and os.path.exists(data_path):
                 local_dataset_path = data_path
             else:
+                # Prepare local dataset path(s)
                 local_dataset_path = os.path.join(temp_work_dir, "data.csv")
                 if data_path:
-                    downloaded = await self.storage_service.download_file(data_path, local_dataset_path)
-                    if not downloaded:
-                        logger.error(f"Failed to download dataset for chain experiment: {data_path}")
-                        return None
+                    # If remote path is a ZIP, download as zip, then extract CSV
+                    is_zip = str(data_path).lower().endswith(".zip")
+                    if is_zip:
+                        local_zip_path = os.path.join(temp_work_dir, "dataset.zip")
+                        downloaded = await self.storage_service.download_file(data_path, local_zip_path)
+                        if not downloaded:
+                            logger.error(f"Failed to download ZIP dataset for chain experiment: {data_path}")
+                            try:
+                                await self.db_service.update_experiment_status(
+                                    experiment_id,
+                                    "preparation_failed",
+                                    error_message=f"Failed to download dataset: {data_path}",
+                                )
+                            except Exception:
+                                pass
+                            return None
+                        # Extract zip and look for any CSV (prefer train.csv or data.csv)
+                        try:
+                            import zipfile
+
+                            with zipfile.ZipFile(local_zip_path, "r") as zf:
+                                extract_dir = os.path.join(temp_work_dir, "extracted")
+                                zf.extractall(extract_dir)
+                            # Heuristics to pick a CSV
+                            preferred: list[str] = []
+                            any_csv: list[str] = []
+                            for root, _, files in os.walk(extract_dir):
+                                for f in files:
+                                    if f.lower().endswith(".csv"):
+                                        full = os.path.join(root, f)
+                                        any_csv.append(full)
+                                        if f.lower() in ("train.csv", "data.csv", "dataset.csv"):
+                                            preferred.append(full)
+                            chosen = preferred[0] if preferred else (any_csv[0] if any_csv else None)
+                            if chosen:
+                                import shutil as _shutil
+
+                                _shutil.copy(chosen, local_dataset_path)
+                            else:
+                                # No CSV found: try to synthesize image/mask pairs CSV from directory structure
+                                from pathlib import Path as _Path
+                                import pandas as _pd
+
+                                img_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+                                image_files: dict[str, str] = {}
+                                mask_files: dict[str, str] = {}
+                                for root, _, files in os.walk(extract_dir):
+                                    root_lower = root.lower()
+                                    for f in files:
+                                        ext = _Path(f).suffix.lower()
+                                        if ext in img_exts:
+                                            full = os.path.join(root, f)
+                                            stem = _Path(f).stem
+                                            # classify as image or mask by folder hint or filename
+                                            is_mask = any(
+                                                k in root_lower for k in ["mask", "masks", "gt", "label"]
+                                            ) or any(
+                                                k in stem.lower()
+                                                for k in ["_mask", "-mask", "_gt", "-gt", "_label", "-label"]
+                                            )
+                                            if is_mask:
+                                                mask_files[stem] = full
+                                            else:
+                                                image_files[stem] = full
+                                pairs: list[tuple[str, str]] = []
+                                # Exact stem matches
+                                for stem, img in image_files.items():
+                                    if stem in mask_files:
+                                        pairs.append((img, mask_files[stem]))
+                                # Fallback: try normalize stems by removing common suffixes
+                                if not pairs and image_files and mask_files:
+
+                                    def _norm(s: str) -> str:
+                                        s = s.lower()
+                                        for suf in [
+                                            "_img",
+                                            "-img",
+                                            "_image",
+                                            "-image",
+                                            "_mask",
+                                            "-mask",
+                                            "_gt",
+                                            "-gt",
+                                            "_label",
+                                            "-label",
+                                        ]:
+                                            if s.endswith(suf):
+                                                s = s[: -len(suf)]
+                                        return s
+
+                                    norm_masks = {_norm(k): v for k, v in mask_files.items()}
+                                    for stem, img in image_files.items():
+                                        ns = _norm(stem)
+                                        if ns in norm_masks:
+                                            pairs.append((img, norm_masks[ns]))
+                                if pairs:
+                                    # Limit to a small number to keep runs quick; keep first N deterministically
+                                    pairs_sorted = sorted(pairs, key=lambda p: p[0])
+                                    df_pairs = _pd.DataFrame(
+                                        [{"image_path": p[0], "mask_path": p[1], "target": 0} for p in pairs_sorted]
+                                    )
+                                    df_pairs.to_csv(local_dataset_path, index=False)
+                                    logger.info(
+                                        f"Synthesized dataset CSV with {len(df_pairs)} image/mask pair(s) from {data_path}"
+                                    )
+                                else:
+                                    # Still nothing: create a minimal placeholder CSV with 4 rows
+                                    rows = 4
+                                    df_min = _pd.DataFrame(
+                                        {
+                                            "problem": [
+                                                f"Sample {i + 1}: segmentation evaluation item" for i in range(rows)
+                                            ],
+                                            "target": [0 for _ in range(rows)],
+                                        }
+                                    )
+                                    df_min.to_csv(local_dataset_path, index=False)
+                                    logger.warning(
+                                        f"No CSV or image/mask pairs found inside ZIP {data_path}; created minimal placeholder CSV with 4 rows"
+                                    )
+                        except Exception as ex:
+                            logger.error(f"Failed to extract/process ZIP dataset {data_path}: {ex}")
+                            try:
+                                await self.db_service.update_experiment_status(
+                                    experiment_id,
+                                    "preparation_failed",
+                                    error_message=f"Failed to extract/process dataset ZIP",
+                                )
+                            except Exception:
+                                pass
+                            return None
+                    else:
+                        # Regular file in storage (assumed CSV)
+                        downloaded = await self.storage_service.download_file(data_path, local_dataset_path)
+                        if not downloaded:
+                            logger.error(f"Failed to download dataset for chain experiment: {data_path}")
+                            try:
+                                await self.db_service.update_experiment_status(
+                                    experiment_id,
+                                    "preparation_failed",
+                                    error_message=f"Failed to download dataset: {data_path}",
+                                )
+                            except Exception:
+                                pass
+                            return None
+
+                        # Check if CSV contains storage paths (image_path/mask_path pointing to storage)
+                        # If so, download those files and update CSV paths to local paths
+                        try:
+                            import pandas as pd
+
+                            df_check = pd.read_csv(local_dataset_path)
+                            if "image_path" in df_check.columns or "mask_path" in df_check.columns:
+                                # Check if paths look like storage paths (start with "data/" or don't start with "/")
+                                needs_download = False
+                                for col in ["image_path", "mask_path"]:
+                                    if col in df_check.columns:
+                                        sample_path = str(df_check[col].iloc[0]) if len(df_check) > 0 else ""
+                                        # If path doesn't exist locally and looks like storage path
+                                        if sample_path and not os.path.exists(sample_path):
+                                            if sample_path.startswith("data/") or (
+                                                not sample_path.startswith("/") and not os.path.isabs(sample_path)
+                                            ):
+                                                needs_download = True
+                                                break
+
+                                if needs_download:
+                                    logger.info(
+                                        f"CSV contains storage paths, downloading referenced files for experiment {experiment_id}"
+                                    )
+                                    # Create local directory for downloaded images/masks
+                                    local_images_dir = os.path.join(temp_work_dir, "images")
+                                    local_masks_dir = os.path.join(temp_work_dir, "masks")
+                                    os.makedirs(local_images_dir, exist_ok=True)
+                                    os.makedirs(local_masks_dir, exist_ok=True)
+
+                                    updated_rows = []
+                                    for idx, row in df_check.iterrows():
+                                        updated_row = row.to_dict()
+
+                                        # Download and update image_path
+                                        if "image_path" in updated_row and updated_row["image_path"]:
+                                            storage_img_path = str(updated_row["image_path"])
+                                            if not os.path.exists(storage_img_path):
+                                                img_filename = os.path.basename(storage_img_path)
+                                                local_img_path = os.path.join(local_images_dir, img_filename)
+                                                img_downloaded = await self.storage_service.download_file(
+                                                    storage_img_path, local_img_path
+                                                )
+                                                if img_downloaded:
+                                                    updated_row["image_path"] = local_img_path
+                                                else:
+                                                    logger.warning(
+                                                        f"Failed to download image from storage: {storage_img_path}"
+                                                    )
+
+                                        # Download and update mask_path
+                                        if "mask_path" in updated_row and updated_row["mask_path"]:
+                                            storage_mask_path = str(updated_row["mask_path"])
+                                            if not os.path.exists(storage_mask_path):
+                                                mask_filename = os.path.basename(storage_mask_path)
+                                                local_mask_path = os.path.join(local_masks_dir, mask_filename)
+                                                mask_downloaded = await self.storage_service.download_file(
+                                                    storage_mask_path, local_mask_path
+                                                )
+                                                if mask_downloaded:
+                                                    updated_row["mask_path"] = local_mask_path
+                                                else:
+                                                    logger.warning(
+                                                        f"Failed to download mask from storage: {storage_mask_path}"
+                                                    )
+
+                                        updated_rows.append(updated_row)
+
+                                    # Save updated CSV with local paths
+                                    updated_df = pd.DataFrame(updated_rows)
+                                    updated_csv_path = os.path.join(temp_work_dir, "dataset_with_local_paths.csv")
+                                    updated_df.to_csv(updated_csv_path, index=False)
+                                    local_dataset_path = updated_csv_path
+                                    logger.info(f"Updated CSV with local file paths for experiment {experiment_id}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to process storage paths in CSV for experiment {experiment_id}: {e}"
+                            )
+                            # Continue with original CSV if processing fails
                 else:
                     logger.error("No dataset path provided for chain experiment")
+                    try:
+                        await self.db_service.update_experiment_status(
+                            experiment_id, "preparation_failed", error_message="Dataset path was not provided"
+                        )
+                    except Exception:
+                        pass
                     return None
 
             dataset_size = chain_spec.get("dataset_size")
@@ -193,16 +421,243 @@ class ExperimentCreationService:
 
             output_root = tempfile.mkdtemp(prefix="gigaevo_chain_")
 
+            # Before building experiment, check if CSV contains local image/mask paths
+            # If so, copy those files to a directory that will be included in the experiment
+            final_dataset_path = local_dataset_path
+            try:
+                import pandas as pd
+
+                df_final = pd.read_csv(local_dataset_path)
+                if ("image_path" in df_final.columns or "mask_path" in df_final.columns) and len(df_final) > 0:
+                    # Check if paths are local (exist on filesystem)
+                    sample_img_path = str(df_final["image_path"].iloc[0]) if "image_path" in df_final.columns else None
+                    if sample_img_path and os.path.exists(sample_img_path):
+                        # Create dataset subdirectory for images and masks
+                        dataset_files_dir = os.path.join(temp_work_dir, "dataset_files")
+                        dataset_images_dir = os.path.join(dataset_files_dir, "images")
+                        dataset_masks_dir = os.path.join(dataset_files_dir, "masks")
+                        os.makedirs(dataset_images_dir, exist_ok=True)
+                        os.makedirs(dataset_masks_dir, exist_ok=True)
+
+                        updated_rows = []
+                        for idx, row in df_final.iterrows():
+                            updated_row = row.to_dict()
+
+                            # Copy image file if it exists locally
+                            if "image_path" in updated_row and updated_row["image_path"]:
+                                img_path = str(updated_row["image_path"])
+                                if os.path.exists(img_path):
+                                    img_filename = os.path.basename(img_path)
+                                    dest_img_path = os.path.join(dataset_images_dir, img_filename)
+                                    shutil.copy2(img_path, dest_img_path)
+                                    # Update path to be relative to dataset directory
+                                    updated_row["image_path"] = os.path.join("dataset_files", "images", img_filename)
+
+                            # Copy mask file if it exists locally
+                            if "mask_path" in updated_row and updated_row["mask_path"]:
+                                mask_path = str(updated_row["mask_path"])
+                                if os.path.exists(mask_path):
+                                    mask_filename = os.path.basename(mask_path)
+                                    dest_mask_path = os.path.join(dataset_masks_dir, mask_filename)
+                                    shutil.copy2(mask_path, dest_mask_path)
+                                    # Update path to be relative to dataset directory
+                                    updated_row["mask_path"] = os.path.join("dataset_files", "masks", mask_filename)
+
+                            updated_rows.append(updated_row)
+
+                        # Save updated CSV with relative paths
+                        updated_df = pd.DataFrame(updated_rows)
+                        updated_csv_path = os.path.join(temp_work_dir, "dataset_final.csv")
+                        updated_df.to_csv(updated_csv_path, index=False)
+                        final_dataset_path = updated_csv_path
+                        logger.info(
+                            f"Updated CSV with relative paths and copied image/mask files for experiment {experiment_id}"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to process local image/mask files for experiment {experiment_id}: {e}")
+                # Continue with original CSV if processing fails
+
             exp_dir = build_chain_experiment(
                 spec=chain_spec,
                 output_root=output_root,
                 template_base=template_base,
-                dataset_path=local_dataset_path,
+                dataset_path=final_dataset_path,
                 experiment_id=experiment_id,
             )
 
+            # Copy dataset_files directory (images/masks) to experiment directory if it exists
+            dataset_files_src = os.path.join(temp_work_dir, "dataset_files")
+            if os.path.exists(dataset_files_src):
+                dataset_files_dst = os.path.join(str(exp_dir), "dataset_files")
+                shutil.copytree(dataset_files_src, dataset_files_dst, dirs_exist_ok=True)
+                logger.info(f"Copied dataset_files (images/masks) to experiment directory for {experiment_id}")
+
+            # Save custom_tools.py if python_code is provided
+            python_code = chain_spec.get("python_code")
+            if python_code and python_code.strip():
+                try:
+                    custom_tools_path = os.path.join(str(exp_dir), "custom_tools.py")
+                    with open(custom_tools_path, "w", encoding="utf-8") as f:
+                        f.write(python_code.strip())
+                    logger.info(f"Saved custom_tools.py for experiment {experiment_id} ({len(python_code)} chars)")
+                except Exception as e:
+                    logger.warning(f"Failed to save custom_tools.py for experiment {experiment_id}: {e}")
+
+            # chain_spec.json is already created by build_chain_experiment() with all necessary fields
+            # (enable_feedback, feedback_template, target_column, evolution_mode)
+            # No need to overwrite it here - just verify it exists
+            chain_spec_path = os.path.join(str(exp_dir), "chain_spec.json")
+            if not os.path.exists(chain_spec_path):
+                logger.warning(
+                    f"chain_spec.json not found after build_chain_experiment for {experiment_id}, creating minimal version"
+                )
+                try:
+                    import json
+
+                    minimal_spec = {
+                        "enable_feedback": chain_spec.get("enable_feedback", True),
+                        "feedback_template": chain_spec.get("feedback_template", "detailed"),
+                        "target_column": chain_spec.get("target_column", ""),
+                        "evolution_mode": chain_spec.get("evolution_mode", "full_chain"),
+                    }
+                    with open(chain_spec_path, "w", encoding="utf-8") as f:
+                        json.dump(minimal_spec, f, indent=2)
+                    logger.info(f"Created minimal chain_spec.json for experiment {experiment_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to create minimal chain_spec.json for experiment {experiment_id}: {e}")
+
+            # Copy feedback integration files if feedback is enabled
+            if chain_spec.get("enable_feedback", False):
+                try:
+                    from pathlib import Path as _Path
+                    import shutil as _shutil
+
+                    # Get the path to master_api directory
+                    # Try multiple potential root locations
+                    current_file = _Path(__file__).resolve()
+
+                    # List of potential master_api directories to search
+                    potential_roots = [
+                        current_file.parent.parent.parent,  # master_api/src/services -> master_api
+                        _Path("/app/master_api"),  # Docker path
+                        _Path("/app"),  # Alternative Docker path
+                        current_file.parent.parent.parent.parent,  # gigaevo-platform
+                    ]
+
+                    master_api_dir = None
+                    feedback_integration_src = None
+                    chain_feedback_service_src = None
+
+                    # Search for feedback_integration.py
+                    feedback_integration_paths = [
+                        "folder_constructor/validate_templates/chain/feedback_integration.py",
+                        "src/folder_constructor/validate_templates/chain/feedback_integration.py",
+                    ]
+
+                    chain_feedback_service_paths = [
+                        "services/chain_feedback_service.py",
+                        "src/services/chain_feedback_service.py",
+                    ]
+
+                    for root in potential_roots:
+                        if root.exists() and master_api_dir is None:
+                            # Try to find feedback_integration.py
+                            for rel_path in feedback_integration_paths:
+                                test_path = root / rel_path
+                                if test_path.exists():
+                                    master_api_dir = root
+                                    feedback_integration_src = test_path
+                                    logger.info(f"Found master_api at {root}")
+                                    break
+                            if master_api_dir:
+                                break
+
+                    # If still not found, try direct absolute paths for Docker
+                    if not feedback_integration_src:
+                        docker_paths = [
+                            _Path(
+                                "/app/master_api/src/folder_constructor/validate_templates/chain/feedback_integration.py"
+                            ),
+                            _Path("/app/src/folder_constructor/validate_templates/chain/feedback_integration.py"),
+                        ]
+                        for docker_path in docker_paths:
+                            if docker_path.exists():
+                                feedback_integration_src = docker_path
+                                logger.info(f"Found feedback_integration.py at Docker path: {docker_path}")
+                                break
+
+                    # Find chain_feedback_service.py
+                    if master_api_dir:
+                        for rel_path in chain_feedback_service_paths:
+                            test_path = master_api_dir / rel_path
+                            if test_path.exists():
+                                chain_feedback_service_src = test_path
+                                break
+
+                    if not chain_feedback_service_src:
+                        docker_paths = [
+                            _Path("/app/master_api/src/services/chain_feedback_service.py"),
+                            _Path("/app/src/services/chain_feedback_service.py"),
+                        ]
+                        for docker_path in docker_paths:
+                            if docker_path.exists():
+                                chain_feedback_service_src = docker_path
+                                logger.info(f"Found chain_feedback_service.py at Docker path: {docker_path}")
+                                break
+
+                    # Copy feedback_integration.py to experiment root
+                    if feedback_integration_src and feedback_integration_src.exists():
+                        feedback_integration_dst = os.path.join(str(exp_dir), "feedback_integration.py")
+                        _shutil.copy(str(feedback_integration_src), feedback_integration_dst)
+                        logger.info(f"Copied feedback_integration.py for experiment {experiment_id}")
+                    else:
+                        logger.error(
+                            f"feedback_integration.py not found in any location for experiment {experiment_id}"
+                        )
+
+                    # Create src/services/ directory structure
+                    src_services_dir = os.path.join(str(exp_dir), "src", "services")
+                    os.makedirs(src_services_dir, exist_ok=True)
+
+                    # Create __init__.py files
+                    with open(os.path.join(str(exp_dir), "src", "__init__.py"), "w") as f:
+                        f.write("")
+                    with open(os.path.join(src_services_dir, "__init__.py"), "w") as f:
+                        f.write("")
+
+                    # Copy chain_feedback_service.py
+                    if chain_feedback_service_src and chain_feedback_service_src.exists():
+                        chain_feedback_service_dst = os.path.join(src_services_dir, "chain_feedback_service.py")
+                        _shutil.copy(str(chain_feedback_service_src), chain_feedback_service_dst)
+                        logger.info(f"Copied chain_feedback_service.py for experiment {experiment_id}")
+                    else:
+                        logger.error(
+                            f"chain_feedback_service.py not found in any location for experiment {experiment_id}"
+                        )
+
+                    if feedback_integration_src and chain_feedback_service_src:
+                        logger.info(f"Successfully set up feedback integration files for experiment {experiment_id}")
+                    else:
+                        logger.warning(f"Partial setup of feedback integration files for experiment {experiment_id}")
+
+                except Exception as feedback_err:
+                    logger.warning(
+                        f"Failed to copy feedback integration files for experiment {experiment_id}: {feedback_err}"
+                    )
+                    import traceback
+
+                    traceback.print_exc()
+                    # Don't fail the experiment creation if feedback files can't be copied
+                    # The experiment will still work, just without feedback
+
             if not exp_dir or not os.path.exists(exp_dir):
                 logger.error("Chain folder constructor did not produce an experiment directory")
+                try:
+                    await self.db_service.update_experiment_status(
+                        experiment_id, "preparation_failed", error_message="Folder constructor produced no output"
+                    )
+                except Exception:
+                    pass
                 return None
 
             storage_base_path = await self.storage_service.upload_experiment_files(str(exp_dir), experiment_id)
@@ -359,11 +814,6 @@ class ExperimentCreationService:
         description = experiment_config.get("description") or params.get("task_description") or ""
         target_column = experiment_config.get("target_column") or params.get("target_column") or "target"
 
-        timeout_seconds = experiment_config.get("timeout_seconds")
-        if timeout_seconds is None or timeout_seconds == 0:
-            max_iterations = experiment_config.get("max_iterations", 100)
-            timeout_seconds = max(3600, int(max_iterations * 90 * 1.3))
-        
         # Create spec JSON structure that matches build_uuid_experiment expectations
         spec_json = {
             "task_type": task_type,
@@ -373,7 +823,6 @@ class ExperimentCreationService:
             # Additional fields for our own use
             "llm_model": experiment_config.get("llm_model", "local-inference"),
             "max_iterations": experiment_config.get("max_iterations", 100),
-            "timeout_seconds": timeout_seconds,
             "parameters": experiment_config.get("parameters", {}),
         }
 

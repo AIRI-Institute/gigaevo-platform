@@ -28,16 +28,10 @@ class WorkerConfig(BaseModel):
 
 
 class GigaEvolveConfig(BaseModel):
-    repo_url: str = "https://github.com/FusionBrainLab/gigaevo-core"
-    repo_ref: Optional[str] = "v1.1.0"
-    repo_force_refresh: bool = False
     redis_url: str = "redis://redis-gigavolve:6379/0"
-    clone_path: str = "./repos/gigaevo-core"
+    clone_path: str = "/opt/gigaevo-core"
     python_path: str = "python3"
     experiment_timeout: int = 7200
-    github_pat: Optional[str] = None
-    git_user_name: str = ""
-    git_user_email: str = ""
     ssl_bypass_enabled: bool = False
     results_collection_interval: int = 10
 

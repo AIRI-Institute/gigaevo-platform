@@ -9,13 +9,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install uv
+    && pip install --no-cache-dir uv
 
-# Copy only pyproject.toml during build (app.py will be mounted as volume)
+# Copy dependency manifests only; app code is mounted in development.
 COPY web_ui/pyproject.toml ./pyproject.toml
+COPY web_ui/uv.lock ./uv.lock
 
-# Install the application using uv
-RUN uv sync
+# Install dependencies without caching package downloads into the image layer.
+RUN uv sync --frozen --no-install-project --no-cache
 
 # Copy entrypoint script
 COPY web_ui/entrypoint.sh /usr/local/bin/entrypoint.sh

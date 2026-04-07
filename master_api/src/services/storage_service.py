@@ -163,15 +163,21 @@ class StorageService:
                     pass
             return False
 
-    async def list_objects(self, prefix: str = "") -> List[str]:
-        """List objects in storage with optional prefix"""
+    async def list_objects(self, prefix: str = "", recursive: bool = False) -> List[str]:
+        """List objects in storage with optional prefix.
+
+        Args:
+            prefix: Object key prefix to filter by.
+            recursive: If True, list all objects under the prefix including nested
+                       "subdirectories". If False (default), only list direct children.
+        """
         if not self.client:
             logger.error("Storage service not initialized")
             return []
 
         try:
             objects = []
-            for obj in self.client.list_objects(self.bucket_name, prefix=prefix):
+            for obj in self.client.list_objects(self.bucket_name, prefix=prefix, recursive=recursive):
                 objects.append(obj.object_name)
             return objects
         except S3Error as e:

@@ -7,6 +7,7 @@ import psutil
 from loguru import logger
 
 from common.version import __version__
+
 from ..models.experiment import ExperimentStatus
 from ..models.instance import RunnerInstanceStatus
 
@@ -15,6 +16,8 @@ class StatusService:
     def __init__(self, service_manager=None):
         self.service_manager = service_manager
         self.start_time = datetime.now(timezone.utc)
+        # Latch once runners reach a healthy state; startup/offline before this is treated as initializing.
+        self._runners_ever_healthy = False
 
     async def get_storage_info(self) -> Dict[str, Any]:
         """Return minimal storage info for clients (bucket name, endpoint)."""
@@ -89,10 +92,32 @@ class StatusService:
                         components["runners"] = "no_instances"
                     elif healthy_instances == total_instances:
                         components["runners"] = "healthy"
+                        self._runners_ever_healthy = True
                     else:
-                        components["runners"] = "degraded"
-                        if overall_status == "healthy":
-                            overall_status = "degraded"
+                        has_error_or_offline = any(
+                            inst.status in [RunnerInstanceStatus.ERROR, RunnerInstanceStatus.OFFLINE]
+                            for inst in instances
+                        )
+                        has_initializing_or_online = any(
+                            inst.status in [RunnerInstanceStatus.INITIALIZING, RunnerInstanceStatus.ONLINE]
+                            for inst in instances
+                        )
+                        if has_error_or_offline and not self._runners_ever_healthy:
+                            components["runners"] = "initializing"
+                            if overall_status == "healthy":
+                                overall_status = "initializing"
+                        elif has_error_or_offline:
+                            components["runners"] = "degraded"
+                            if overall_status == "healthy":
+                                overall_status = "degraded"
+                        elif has_initializing_or_online:
+                            components["runners"] = "initializing"
+                            if overall_status == "healthy":
+                                overall_status = "initializing"
+                        else:
+                            components["runners"] = "degraded"
+                            if overall_status == "healthy":
+                                overall_status = "degraded"
                 except Exception as e:
                     logger.error(f"Runner health check failed: {e}")
                     components["runners"] = "unhealthy"
@@ -139,6 +164,7 @@ class StatusService:
                 "running": 0,
                 "completed": 0,
                 "failed": 0,
+                "terminated": 0,
                 "preparation_failed": 0,
                 "stopped": 0,
             }

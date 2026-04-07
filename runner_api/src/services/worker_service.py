@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from redis.asyncio import Redis
-
-from ..config import load_config
 from ..models.worker import Worker, WorkerStatus, WorkerUpdate
+from .redis_client import get_redis
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerService:
-    def __init__(self):
-        self.config = load_config()
-        self._redis: Optional[Redis] = None
-
-    async def _get_redis(self) -> Redis:
-        if self._redis is None:
-            self._redis = Redis.from_url(self.config.redis.url, decode_responses=True)
-        return self._redis
-
     @staticmethod
     def _hash_to_worker(data: dict) -> Optional[Worker]:
         if not data:
@@ -41,7 +33,9 @@ class WorkerService:
                 total_tasks_completed=int(data.get("total_tasks_completed", 0)),
                 error_message=data.get("error_message") or None,
             )
-        except Exception:
+        except Exception as exc:
+            worker_id = data.get("id", "unknown")
+            logger.warning(f"Failed to deserialize worker {worker_id}: {exc}")
             return None
 
     @staticmethod
@@ -53,17 +47,15 @@ class WorkerService:
             "current_task_id": worker.current_task_id or "",
             "capabilities": json.dumps(worker.capabilities),
             "resources": json.dumps(worker.resources),
-            "created_at": worker.created_at.replace(tzinfo=timezone.utc).isoformat(),
-            "last_heartbeat": worker.last_heartbeat.replace(tzinfo=timezone.utc).isoformat()
-            if worker.last_heartbeat
-            else "",
+            "created_at": worker.created_at.isoformat(),
+            "last_heartbeat": worker.last_heartbeat.isoformat() if worker.last_heartbeat else "",
             "total_tasks_completed": str(worker.total_tasks_completed),
             "error_message": worker.error_message or "",
         }
 
     async def list_workers(self) -> List[Worker]:
         """List all workers registered in Redis"""
-        redis = await self._get_redis()
+        redis = await get_redis()
         worker_ids = await redis.smembers("workers")
         if not worker_ids:
             return []
@@ -80,33 +72,26 @@ class WorkerService:
 
     async def get_worker(self, worker_id: str) -> Optional[Worker]:
         """Get worker by ID"""
-        redis = await self._get_redis()
+        redis = await get_redis()
         data = await redis.hgetall(f"worker:{worker_id}")
         return self._hash_to_worker(data)
 
     async def update_heartbeat(self, worker_id: str) -> bool:
         """Update or create worker heartbeat"""
-        redis = await self._get_redis()
+        redis = await get_redis()
         key = f"worker:{worker_id}"
         now = datetime.now(timezone.utc).isoformat()
         pipe = redis.pipeline()
-        pipe.hset(
-            key,
-            mapping={
-                "id": worker_id,
-                "name": worker_id,
-                "status": WorkerStatus.IDLE.value,
-                "last_heartbeat": now,
-                "created_at": now,
-            },
-        )
+        pipe.hset(key, mapping={"id": worker_id, "name": worker_id, "last_heartbeat": now})
+        pipe.hsetnx(key, "created_at", now)
+        pipe.hsetnx(key, "status", WorkerStatus.IDLE.value)
         pipe.sadd("workers", worker_id)
         await pipe.execute()
         return True
 
     async def update_worker(self, worker_id: str, worker_update: WorkerUpdate) -> Optional[Worker]:
         """Update worker status/fields"""
-        redis = await self._get_redis()
+        redis = await get_redis()
         key = f"worker:{worker_id}"
         existing = await redis.hgetall(key)
         if not existing:
@@ -133,7 +118,7 @@ class WorkerService:
 
     async def stop_worker(self, worker_id: str) -> bool:
         """Signal a worker to stop by setting a stop flag."""
-        redis = await self._get_redis()
+        redis = await get_redis()
         key = f"worker:{worker_id}"
         exists = await redis.exists(key)
         if not exists:

@@ -28,7 +28,7 @@ def validate(
     - selected_idx: (K,) int indices of columns to keep
     """
     # Silence LightAutoML text extras warnings BEFORE importing it, so
-    # ничего не печатается в stdout/stderr и не ломает cloudpickle-протокол.
+    # nothing is printed to stdout/stderr which would break the cloudpickle protocol.
     warnings.filterwarnings(
         "ignore",
         message="'nltk' - package isn't installed",
@@ -66,7 +66,7 @@ def validate(
     buf_err = io.StringIO()
     with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
         # Import LightAutoML only inside the redirection context so that
-        # любые сообщения/варнинги от библиотек не попадут в внешние логи.
+        # library warnings/messages do not leak into external logs.
         from lightautoml.automl.presets.tabular_presets import TabularAutoML
 
         task = _build_lama_task(y_train)

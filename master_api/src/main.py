@@ -218,6 +218,31 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"Failed to preload local prompt preset datasets: {e}")
 
+        # Preload local CARL preset dataset directory to storage under data/
+        try:
+            storage = service_manager.get_storage_service()
+            # Directory baked into image: /app/data_examples/mask_and_frac_june
+            carl_preset_dir = os.path.normpath("/app/data_examples/mask_and_frac_june")
+            if os.path.isdir(carl_preset_dir):
+                # Upload directory as a ZIP under data/ if not already present
+                object_name = "data/mask_and_frac_june.zip"
+                try:
+                    exists = await storage.object_exists(object_name)
+                except Exception:
+                    exists = False
+                if not exists:
+                    ok = await storage.upload_directory_as_zip(
+                        carl_preset_dir,
+                        object_name,
+                        metadata={"source": "local_carl_preset", "example_name": "mask_and_frac_june"},
+                    )
+                    if ok:
+                        logger.info(f"Preloaded CARL preset dataset into storage: {object_name}")
+            else:
+                logger.info(f"CARL preset directory not found, skipping preload: {carl_preset_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to preload CARL preset datasets: {e}")
+
         logger.info("GigaEvo Platform Master API startup completed")
 
         # Start background results ingestion loop: pulls reports from MinIO and updates DB every 10s
@@ -275,6 +300,11 @@ async def startup_event():
                             update_kwargs = {}
                             if current_metrics:
                                 update_kwargs["metrics"] = current_metrics
+
+                            # Extract chain configs from evolution report (chain experiments)
+                            best_chain_config = payload.get("best_chain_config")
+                            initial_chain_config = payload.get("initial_chain_config")
+
                             # Persist best program and validation artifacts into S3 and DB for quick download
                             try:
                                 # Keys
@@ -282,6 +312,8 @@ async def startup_event():
                                 best_program_key = f"{base_results_prefix}best_program.py"
                                 validation_dst_key = f"{base_results_prefix}validate.py"
                                 results_zip_key = f"{base_results_prefix}results.zip"
+                                best_chain_config_key = f"{base_results_prefix}best_chain_config.json"
+                                initial_chain_config_key = f"{base_results_prefix}initial_chain_config.json"
 
                                 # Upload latest best_program.py every tick (overwrite allowed)
                                 if best_program_code:
@@ -290,6 +322,25 @@ async def startup_event():
                                         best_program_key,
                                         metadata={"type": "best_program", "experiment_id": exp_id},
                                     )
+
+                                # Upload best chain config JSON (chain experiments)
+                                if best_chain_config and isinstance(best_chain_config, dict):
+                                    await storage.upload_bytes(
+                                        json.dumps(best_chain_config, indent=2, ensure_ascii=False).encode("utf-8"),
+                                        best_chain_config_key,
+                                        metadata={"type": "best_chain_config", "experiment_id": exp_id},
+                                    )
+
+                                # Upload initial chain config JSON (chain experiments, one-time)
+                                if initial_chain_config and isinstance(initial_chain_config, dict):
+                                    if not await storage.object_exists(initial_chain_config_key):
+                                        await storage.upload_bytes(
+                                            json.dumps(initial_chain_config, indent=2, ensure_ascii=False).encode(
+                                                "utf-8"
+                                            ),
+                                            initial_chain_config_key,
+                                            metadata={"type": "initial_chain_config", "experiment_id": exp_id},
+                                        )
 
                                 # Upload/copy latest validation under results (overwrite allowed)
                                 exp_model = await db.get_experiment(exp_id)
@@ -311,6 +362,28 @@ async def startup_event():
                                                         val_bytes, validation_dst_key, metadata={"type": "validation"}
                                                     )
 
+                                        # If initial_chain_config not in report, try to get from experiment files
+                                        if not initial_chain_config:
+                                            initial_src_key = base_prefix.rstrip("/") + "/base_chain_config.json"
+                                            if not await storage.object_exists(initial_chain_config_key):
+                                                if await storage.object_exists(initial_src_key):
+                                                    copied = await storage.copy_object(
+                                                        initial_src_key,
+                                                        initial_chain_config_key,
+                                                        metadata={"type": "initial_chain_config"},
+                                                    )
+                                                    if not copied:
+                                                        init_bytes = await storage.download_bytes(initial_src_key)
+                                                        if init_bytes:
+                                                            await storage.upload_bytes(
+                                                                init_bytes,
+                                                                initial_chain_config_key,
+                                                                metadata={
+                                                                    "type": "initial_chain_config",
+                                                                    "experiment_id": exp_id,
+                                                                },
+                                                            )
+
                                 # Rebuild results.zip every tick if best_program available
                                 if best_program_code:
                                     import io as _io
@@ -323,6 +396,18 @@ async def startup_event():
                                         val_b = await storage.download_bytes(validation_dst_key)
                                         if val_b:
                                             zf.writestr("validate.py", val_b)
+                                        # Include best chain config (chain experiments)
+                                        if best_chain_config and isinstance(best_chain_config, dict):
+                                            zf.writestr(
+                                                "best_chain_config.json",
+                                                json.dumps(best_chain_config, indent=2, ensure_ascii=False).encode(
+                                                    "utf-8"
+                                                ),
+                                            )
+                                        # Include initial chain config (chain experiments)
+                                        initial_b = await storage.download_bytes(initial_chain_config_key)
+                                        if initial_b:
+                                            zf.writestr("initial_chain_config.json", initial_b)
                                     mem.seek(0)
                                     await storage.upload_bytes(
                                         mem.getvalue(),
@@ -341,6 +426,13 @@ async def startup_event():
                                         }
                                     )
                                     current.update({"program_code": best_program_code, "artifacts": artifacts})
+                                    # Include best chain config in DB best_result (chain experiments)
+                                    if best_chain_config and isinstance(best_chain_config, dict):
+                                        current["best_chain_config"] = best_chain_config
+                                        artifacts["best_chain_config"] = best_chain_config_key
+                                    if initial_chain_config and isinstance(initial_chain_config, dict):
+                                        current["initial_chain_config"] = initial_chain_config
+                                        artifacts["initial_chain_config"] = initial_chain_config_key
                                     update_kwargs["best_result"] = current
                             except Exception:
                                 # Non-fatal

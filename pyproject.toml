@@ -37,6 +37,7 @@ runner = [
     "asyncio-mqtt>=0.16.0",
     "joblib>=1.3.0",
     "loguru>=0.7.0",
+    "packaging",
     "networkx",
     "scipy",
     "pandas",
@@ -83,6 +84,3 @@ exclude = [
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
-
-[tool.uv.workspace]
-members = ["web_ui", "runner_api"]

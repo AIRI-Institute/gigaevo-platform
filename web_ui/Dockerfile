@@ -8,17 +8,21 @@ ENV PYTHONPATH=/app
 RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install uv
+    && pip install --no-cache-dir uv
 
-# Copy dependency manifest first (better caching), then install deps
+# Copy dependency manifests first so the baked venv matches the lockfile.
 COPY web_ui/pyproject.toml ./pyproject.toml
-RUN uv sync
+COPY web_ui/uv.lock ./uv.lock
+RUN uv sync --frozen --no-install-project --no-cache
 
 # Copy application source code
 COPY web_ui/ ./
 
 # Shared code
 COPY common/ ./common/
+
+# Chain diff for Experiment Results (import as src.services.chain_diff_service)
+COPY master_api/src /app/_master_api_vendor/src
 
 # Create non-root user and fix ownership
 RUN useradd -m -u 1000 gigaevouser && chown -R gigaevouser:gigaevouser /app

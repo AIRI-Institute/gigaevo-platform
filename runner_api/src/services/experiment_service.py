@@ -2,8 +2,10 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import re
 import shutil
 from datetime import datetime, timezone
 from enum import Enum
@@ -12,10 +14,11 @@ from typing import Any, Dict, List, Optional
 
 from minio import Minio
 from minio.error import S3Error
-from redis.asyncio import Redis
 
 from ..config import load_config
 from ..models.task import Task, TaskCreate, TaskStatus, TaskType
+from .redis_client import get_redis
+from .task_repository import TaskRepository
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +28,19 @@ class ExperimentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    TERMINATED = "terminated"
     CANCELLED = "cancelled"
 
 
 class ExperimentService:
-    def __init__(self):
+    def __init__(self, task_repository: Optional[TaskRepository] = None):
         self.config = load_config()
-        self.redis: Optional[Redis] = None
         self.minio_client: Optional[Minio] = None
+        self.task_repository = task_repository or TaskRepository()
         self._experiment_workspaces = Path(self.config.gigavolve.clone_path) / "problems"
         self._experiment_workspaces.mkdir(exist_ok=True)
-
-    async def _get_redis(self) -> Redis:
-        """Get Redis connection"""
-        if self.redis is None:
-            self.redis = Redis.from_url(self.config.redis.url, decode_responses=True)
-        return self.redis
+        self._feedback_last_hash: Dict[str, str] = {}
+        self._feedback_last_iter: Dict[str, int] = {}
 
     def _get_minio_client(self) -> Minio:
         """Get MinIO client"""
@@ -69,14 +69,12 @@ class ExperimentService:
 
     async def close(self):
         """Close connections and cleanup resources"""
-        if self.redis:
-            await self.redis.close()
-            self.redis = None
+        return
 
     async def list_running_experiment_ids(self) -> List[str]:
         """Return list of experiment ids that are currently in RUNNING state (from Redis)."""
         try:
-            redis = await self._get_redis()
+            redis = await get_redis()
             # Scan over status hashes
             cursor = 0
             running: List[str] = []
@@ -170,8 +168,143 @@ class ExperimentService:
             logger.error(f"Failed to upload artifacts for {experiment_id}: {e}")
         return uploaded_any
 
+    async def upload_feedback_files(self, experiment_id: str, feedback_file: Path, iteration: int) -> bool:
+        """Upload a chain feedback file to S3 with iteration path.
+
+        Args:
+            experiment_id: Experiment ID
+            feedback_file: Path to chain_feedback.md or chain_feedback.json
+            iteration: Iteration number
+
+        Returns:
+            True if upload succeeded
+        """
+        try:
+            minio = self._get_minio_client()
+            bucket_name = self.config.storage.bucket_name
+
+            # Create iteration-specific S3 path (preserve original filename)
+            s3_key = f"experiments_results/{experiment_id}/iteration_{iteration}/{feedback_file.name}"
+
+            # Upload file
+            await asyncio.to_thread(minio.fput_object, bucket_name, s3_key, str(feedback_file))
+
+            logger.info(f"Uploaded feedback to s3://{bucket_name}/{s3_key}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upload feedback for {experiment_id} iteration {iteration}: {e}")
+            return False
+
+    _ITERATION_PATH_RE = re.compile(r"/(?:iteration|generation|gen)_(\d+)(?:/|$)")
+
+    @staticmethod
+    def _iteration_from_chain_feedback_path(feedback_file: Path) -> Optional[int]:
+        """Infer evolution iteration from path (GigaEvolve uses generation_N; we store as iteration_N in S3).
+
+        Returns None when path contains no iteration/generation pattern.
+        """
+        s = str(feedback_file.resolve()).replace("\\", "/")
+        m = ExperimentService._ITERATION_PATH_RE.search(s)
+        if m:
+            return int(m.group(1))
+        return None
+
+    async def _get_current_iteration_from_report(self, experiment_id: str) -> int:
+        """Read total_iterations from the local evolution report to determine the current generation.
+
+        total_iterations = max(metadata_iteration) + 1, reflecting the highest generation with
+        at least one completed evaluation. The current feedback corresponds to that generation.
+        """
+        clone_root = Path(self.config.gigavolve.clone_path)
+        candidates = [experiment_id]
+        if experiment_id.startswith("exp_"):
+            candidates.append(experiment_id[4:])
+        else:
+            candidates.append(f"exp_{experiment_id}")
+
+        for name in candidates:
+            report_path = clone_root / "outputs" / name / "evolution_report.json"
+            if report_path.exists():
+                try:
+                    data = json.loads(await asyncio.to_thread(report_path.read_text, encoding="utf-8"))
+                    total = data.get("total_iterations", 0)
+                    return max(0, total - 1) if total > 0 else 0
+                except Exception:
+                    continue
+        return 0
+
+    async def collect_and_upload_chain_feedback(self, experiment_id: str) -> int:
+        """Scan experiment workspace/outputs for chain_feedback.md and upload each to storage.
+
+        Runs independently of plot/report generation so feedback still reaches S3 if metrics plots fail.
+        For feedback files without an explicit iteration in the path (typical when validate.py saves to
+        PROBLEM_DIR), the current iteration is determined from the local evolution report.
+        """
+        exp_id = str(experiment_id)
+        clone_root = Path(self.config.gigavolve.clone_path)
+        workspace = clone_root / "problems" / exp_id
+        outputs_dir = clone_root / "outputs" / exp_id
+
+        feedback_files: List[Path] = []
+        if workspace.exists():
+            for p in workspace.rglob("chain_feedback.md"):
+                feedback_files.append(p)
+        if outputs_dir.exists():
+            for p in outputs_dir.rglob("chain_feedback.md"):
+                feedback_files.append(p)
+
+        if not feedback_files:
+            return 0
+
+        report_iteration: Optional[int] = None
+
+        uploaded_count = 0
+        for feedback_file in feedback_files:
+            try:
+                path_iteration = self._iteration_from_chain_feedback_path(feedback_file)
+
+                if path_iteration is not None:
+                    iteration = path_iteration
+                else:
+                    if report_iteration is None:
+                        report_iteration = await self._get_current_iteration_from_report(exp_id)
+                    iteration = report_iteration
+
+                    content = await asyncio.to_thread(feedback_file.read_bytes)
+                    content_hash = hashlib.md5(content).hexdigest()
+                    prev_hash = self._feedback_last_hash.get(exp_id)
+                    prev_iter = self._feedback_last_iter.get(exp_id, -1)
+
+                    if content_hash == prev_hash and iteration == prev_iter:
+                        continue
+
+                    self._feedback_last_hash[exp_id] = content_hash
+                    self._feedback_last_iter[exp_id] = iteration
+
+                ok = await self.upload_feedback_files(
+                    experiment_id=exp_id,
+                    feedback_file=feedback_file,
+                    iteration=iteration,
+                )
+                if ok:
+                    uploaded_count += 1
+                    json_file = feedback_file.parent / "chain_feedback.json"
+                    if json_file.exists():
+                        await self.upload_feedback_files(
+                            experiment_id=exp_id,
+                            feedback_file=json_file,
+                            iteration=iteration,
+                        )
+            except Exception as e:
+                logger.warning(f"Error uploading chain feedback from {feedback_file}: {e}")
+        return uploaded_count
+
     async def initialize_experiment(self, experiment_id: str, config: Dict[str, Any]) -> bool:
-        """Initialize experiment in runner"""
+        """Initialize experiment in runner.
+
+        Config may contain memory-related fields (enable_memory, memory_namespace)
+        that are persisted to config.json and later read by GigaEvolveService.run_experiment.
+        """
         try:
             experiment_id_str = str(experiment_id)
             workspace = self._experiment_workspaces / experiment_id_str
@@ -196,7 +329,7 @@ class ExperimentService:
                 return False
 
             # Create experiment status in Redis
-            redis = await self._get_redis()
+            redis = await get_redis()
             status_key = f"experiment:{experiment_id_str}:status"
             await redis.hset(
                 status_key,
@@ -322,7 +455,7 @@ class ExperimentService:
         """Start experiment execution"""
         try:
             experiment_id_str = str(experiment_id)
-            redis = await self._get_redis()
+            redis = await get_redis()
 
             # Validate experiment state
             status_key = f"experiment:{experiment_id_str}:status"
@@ -336,6 +469,8 @@ class ExperimentService:
             if current_status in [
                 ExperimentStatus.RUNNING.value,
                 ExperimentStatus.COMPLETED.value,
+                ExperimentStatus.TERMINATED.value,
+                ExperimentStatus.CANCELLED.value,
             ]:
                 logger.warning(f"Experiment {experiment_id} is already {current_status}")
                 return False
@@ -351,50 +486,33 @@ class ExperimentService:
                 )
             ]
 
-            # Use pipeline for atomic operations
-            pipe = redis.pipeline()
+            tasks = [Task(**item.model_dump()) for item in task_plan]
 
-            # Update status to running
-            pipe.hset(status_key, "status", ExperimentStatus.RUNNING.value)
-            pipe.hset(status_key, "started_at", datetime.now(timezone.utc).isoformat())
-
-            # Add tasks to Redis queue
-            task_ids = []
-            queue_key = f"experiment:{experiment_id_str}:tasks"
-
-            for item in task_plan:
-                task = Task(**item.model_dump())
-
-                # Store complete task data in Redis
-                task_key = f"task:{task.id}"
-                task_data = {
-                    "id": str(task.id),
-                    "experiment_id": str(task.experiment_id),
-                    "task_type": task.task_type.value,
-                    "status": task.status.value,
-                    "parameters": json.dumps(task.parameters),
-                    "result": json.dumps(task.result) if task.result else "",
-                    "error_message": task.error_message or "",
-                    "created_at": task.created_at.isoformat(),
-                    "started_at": task.started_at.isoformat() if task.started_at else "",
-                    "completed_at": task.completed_at.isoformat() if task.completed_at else "",
-                    "worker_id": task.worker_id or "",
-                    "progress": str(task.progress),
-                }
-                pipe.hset(task_key, mapping=task_data)
-
-                # Add to experiment task queue
-                pipe.lpush(queue_key, str(task.id))
-
-                # Collect for global queue
-                task_ids.append(str(task.id))
-
-            # Add all to global task queue for workers
-            if task_ids:
-                pipe.lpush("task_queue", *task_ids)
-
-            # Execute all operations atomically
-            await pipe.execute()
+            # Atomically set experiment RUNNING and enqueue tasks.
+            try:
+                started_at = datetime.now(timezone.utc).isoformat()
+                pipe = redis.pipeline(transaction=True)
+                pipe.hset(
+                    status_key,
+                    mapping={
+                        "status": ExperimentStatus.RUNNING.value,
+                        "started_at": started_at,
+                    },
+                )
+                for task in tasks:
+                    self.task_repository.add_enqueue_ops(pipe, task)
+                await pipe.execute()
+            except Exception as e:
+                logger.error(f"Failed to start experiment {experiment_id} atomically: {e}")
+                await redis.hset(
+                    status_key,
+                    mapping={
+                        "status": ExperimentStatus.FAILED.value,
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "status_message": "Failed to start experiment",
+                    },
+                )
+                return False
 
             logger.info(f"Started experiment {experiment_id} with {len(task_plan)} tasks")
             return True
@@ -419,7 +537,7 @@ class ExperimentService:
         """Stop experiment execution"""
         try:
             experiment_id_str = str(experiment_id)
-            redis = await self._get_redis()
+            redis = await get_redis()
 
             # Update status to cancelled
             status_key = f"experiment:{experiment_id_str}:status"
@@ -459,7 +577,7 @@ class ExperimentService:
         """Get experiment execution status"""
         try:
             experiment_id_str = str(experiment_id)
-            redis = await self._get_redis()
+            redis = await get_redis()
 
             # Get experiment status
             status_key = f"experiment:{experiment_id_str}:status"
@@ -475,6 +593,7 @@ class ExperimentService:
             total_tasks = len(task_ids)
             completed_tasks = 0
             failed_tasks = 0
+            terminated_tasks = 0
             queued_tasks = 0
             running_tasks = 0
             last_error_message: str = ""
@@ -496,6 +615,8 @@ class ExperimentService:
                         failed_tasks += 1
                         if not last_error_message:
                             last_error_message = task_data.get("error_message", "") or ""
+                    elif task_status == TaskStatus.TERMINATED.value:
+                        terminated_tasks += 1
                     elif task_status == TaskStatus.QUEUED.value:
                         queued_tasks += 1
                     elif task_status == TaskStatus.RUNNING.value:
@@ -510,11 +631,13 @@ class ExperimentService:
                 "total_tasks": total_tasks,
                 "completed_tasks": completed_tasks,
                 "failed_tasks": failed_tasks,
+                "terminated_tasks": terminated_tasks,
                 "queued_tasks": queued_tasks,
                 "running_tasks": running_tasks,
                 "workspace": status_data.get("workspace", ""),
                 "created_at": status_data.get("created_at", ""),
                 "started_at": status_data.get("started_at", ""),
+                "status_message": status_data.get("status_message", ""),
                 "error_message": last_error_message or "",
                 "metrics": {
                     "progress_percentage": progress,
@@ -572,6 +695,14 @@ class ExperimentService:
                 "code": code,
             }
 
+            # Include chain configs if available (chain experiments)
+            if payload.get("best_chain_config"):
+                result["best_chain_config"] = payload["best_chain_config"]
+            if payload.get("initial_chain_config"):
+                result["initial_chain_config"] = payload["initial_chain_config"]
+
+            return result
+
         except Exception as e:
             logger.error(f"Failed to get best program for experiment {experiment_id}: {e}")
             return None
@@ -610,7 +741,7 @@ class ExperimentService:
 
             # Group by experiment_id (first path segment after "experiments/")
             experiments_map: Dict[str, Dict[str, Any]] = {}
-            redis = await self._get_redis()
+            redis = await get_redis()
 
             for obj in objects:
                 # Skip any objects that don't live under the experiments/ prefix
@@ -666,27 +797,25 @@ class ExperimentService:
         """Clean up experiment workspace and Redis data"""
         try:
             experiment_id_str = str(experiment_id)
-            redis = await self._get_redis()
+            redis = await get_redis()
 
             # Get task IDs
             queue_key = f"experiment:{experiment_id_str}:tasks"
             task_ids = await redis.lrange(queue_key, 0, -1)
 
-            # Delete task data
-            for task_id in task_ids:
-                task_key = f"task:{task_id}"
-                await redis.delete(task_key)
+            status_key = f"experiment:{experiment_id_str}:status"
 
-            # Remove from global task queue
+            # Remove task data and indexes in one batch.
             if task_ids:
                 pipe = redis.pipeline()
                 for tid in task_ids:
+                    pipe.delete(f"task:{tid}")
                     pipe.lrem("task_queue", 0, tid)
+                pipe.srem("all_tasks", *task_ids)
+                pipe.delete(status_key, queue_key)
                 await pipe.execute()
-
-            # Remove Redis data
-            status_key = f"experiment:{experiment_id_str}:status"
-            await redis.delete(status_key, queue_key)
+            else:
+                await redis.delete(status_key, queue_key)
 
             # Clean up workspace
             workspace = self._experiment_workspaces / experiment_id_str

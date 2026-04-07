@@ -7,8 +7,8 @@ services:
     environment:
       - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
       - STORAGE__ENDPOINT_URL=http://minio:9000
-      - STORAGE__ACCESS_KEY=minioadmin
-      - STORAGE__SECRET_KEY=minioadmin
+      - STORAGE__ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - STORAGE__SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - REDIS_URL=redis://redis:6379/0
       - KAFKA__ENABLED=true
       - KAFKA__BOOTSTRAP_SERVERS=kafka:9092
@@ -17,8 +17,9 @@ services:
       - RUNNER__POOL_HOST_PREFIX=runner-api-
       # Compose manages runner containers; Master monitors/allocates only
       - RUNNER__MANAGE_CONTAINERS=false
+      - RUNNER__NETWORK_NAME=${GIGAEVO_NETWORK_NAME:-gigaevo-network}
     ports:
-      - "8000:8000"
+      - "${MASTER_API_HOST_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,3 +46,4 @@ services:
 networks:
   gigaevo-network:
     external: true
+    name: ${GIGAEVO_NETWORK_NAME:-gigaevo-network}

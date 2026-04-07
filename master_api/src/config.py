@@ -66,7 +66,7 @@ class RunnerConfig(BaseModel):
     # Container configuration
     image_name: str = "gigaevo-runner-api:latest"
     container_name_prefix: str = "gigaevo-runner"
-    network_name: str = "gigaevo-network"
+    network_name: str = os.getenv("GIGAEVO_NETWORK_NAME", "gigaevo-network")
 
     # Health check settings
     health_check_interval: int = 15  # seconds
@@ -126,6 +126,7 @@ class Config(BaseSettings):
     # Redis (for task queue coordination)
     redis_url: str = "redis://localhost:6379/0"
     timezone: ZoneInfo = ZoneInfo("Europe/Moscow")
+    memory_api_url: Optional[str] = None
 
     # External templates
     templates: TemplatesConfig = TemplatesConfig()

@@ -18,6 +18,7 @@ dependencies = [
     "tensorboardX",
     "orjson",
     "diffpatch",
+    "packaging",
     "minio==7.2.18",
     "anthropic>=0.7.0",
     "asyncio-mqtt>=0.16.0",

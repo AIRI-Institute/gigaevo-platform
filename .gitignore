@@ -10,9 +10,9 @@ wheels/
 # Virtual environments
 .venv
 input_data/*
-uv.lock
 .env
 llm_models.yml
+.bundle-runtime/
 
 # Generated runner pool compose overrides
 docker-compose.runner-pool.generated.yml
@@ -20,7 +20,7 @@ docker-compose.runner-pool.dev.generated.yml
 docker-compose.runner-pool.*.generated.yml
 
 .aider*
-.DS_store
+.DS_Store
 .ruff_cache
 *.ipynb
 *.tsv
@@ -37,5 +37,3 @@ master_api/temp_experiments/*
 !master_api/temp_experiments/.gitkeep
 master_api/gigaevo_master.db
 web_ui/input_data
-
-

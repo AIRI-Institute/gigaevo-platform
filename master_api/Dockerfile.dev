@@ -4,27 +4,28 @@ WORKDIR /app
 
 ENV PYTHONPATH=/app
 
-# Install system dependencies and uv
+# Install system dependencies, the Docker CLI client, and uv
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     curl \
-    docker.io \
+    docker-cli \
     gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install uv
+    && pip install --no-cache-dir uv
 
-# Copy application code and pyproject.toml
+# Copy dependency manifests first so dependency layers survive source-only edits.
+COPY master_api/pyproject.toml ./pyproject.toml
+COPY master_api/uv.lock ./uv.lock
+
+# Install dependencies without caching package downloads into the image layer.
+RUN uv sync --frozen --no-install-project --no-cache
+
+# Copy application code after dependency resolution.
 COPY master_api/src/ ./src/
 COPY master_api/data_examples/ ./data_examples/
 COPY master_api/prompt_examples/ ./prompt_examples/
-COPY master_api/pyproject.toml ./pyproject.toml
-
-# Shared code
 COPY common/ ./common/
-
-# Install the application using uv
-RUN uv sync
 
 # Copy entrypoint script
 COPY master_api/entrypoint.sh /usr/local/bin/entrypoint.sh

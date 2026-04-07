@@ -98,6 +98,29 @@ async def cleanup_experiment(experiment_id: str, service: ExperimentService = De
     return {"message": "Experiment cleaned up", "experiment_id": experiment_id}
 
 
+@router.post("/{experiment_id}/upload-to-memory")
+async def upload_to_memory(
+    experiment_id: str,
+    config: Dict[str, Any],
+    service: ExperimentService = Depends(get_experiment_service),
+):
+    """Run Ideas Tracker to extract ideas from experiment and write MemoryCards."""
+    try:
+        from ...services.gigavolve_service import GigaEvolveService
+
+        gigavolve = GigaEvolveService()
+        result = await gigavolve.run_ideas_tracker(experiment_id, config)
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "Ideas Tracker failed"))
+        return result
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/")
 async def list_uploaded_experiments(
     limit: int = Query(default=100, le=1000, description="Maximum number of experiments to return"),

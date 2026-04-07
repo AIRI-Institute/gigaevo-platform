@@ -10,9 +10,18 @@ from ...services.worker_service import WorkerService
 router = APIRouter()
 
 
+_worker_service: WorkerService | None = None
+
+
+def set_worker_service(service: WorkerService | None) -> None:
+    global _worker_service
+    _worker_service = service
+
+
 def get_worker_service() -> WorkerService:
-    # TODO: Implement dependency injection
-    return WorkerService()
+    if _worker_service is None:
+        raise HTTPException(status_code=500, detail="WorkerService not initialized")
+    return _worker_service
 
 
 @router.get("/", response_model=List[Worker])

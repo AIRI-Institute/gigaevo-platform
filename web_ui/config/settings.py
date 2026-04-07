@@ -39,6 +39,7 @@ STATUS_COLORS: Dict[str, str] = {
     "disabled": "#6b7280ff",  # Gray - muted
     "not_configured": "#6b7280ff",  # Gray - muted
     "no_instances": "#3b82f6ff",  # Blue - info
+    "initializing": "#3b82f6ff",  # Blue - info
     "unknown": "#6b7280ff",  # Gray - muted
     "online": "#13c1acff",  # Green - brand primary
     "ready": "#13c1acff",  # Green - brand primary

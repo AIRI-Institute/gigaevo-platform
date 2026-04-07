@@ -153,7 +153,7 @@ def format_experiment_details(experiment: Dict[str, Any]) -> Tuple[str, str]:
             if dataset_size is not None:
                 train_rows = int(dataset_size * (1.0 - test_size))
                 test_rows = int(dataset_size * test_size)
-                details += f"    - **Train/Test Split:**\n"
+                details += "    - **Train/Test Split:**\n"
                 details += f"      - Train: {train_rows:,} rows ({train_size_pct:.1f}%)\n"
                 details += f"      - Test: {test_rows:,} rows ({test_size_pct:.1f}%)\n"
 

@@ -192,6 +192,7 @@ class ExperimentService:
             terminal_statuses = {
                 ExperimentStatus.COMPLETED.value,
                 ExperimentStatus.FAILED.value,
+                ExperimentStatus.TERMINATED.value,
                 ExperimentStatus.CANCELLED.value,
             }
             grace = int(getattr(self.config.runner, "missing_status_grace_seconds", 30) or 30)
@@ -212,18 +213,21 @@ class ExperimentService:
                             payload = resp.json()
                             runner_status = str(payload.get("status", "")).lower()
                             runner_error = payload.get("error_message")
+                            runner_status_message = payload.get("status_message")
                             _ = self._missing_status_404_counts.pop((str(assigned_runner_id), str(experiment_id)), None)
                             # If runner reports a terminal status, reflect it in DB and release runner.
                             if runner_status in terminal_statuses:
                                 update_kwargs: Dict[str, Any] = {}
-                                # Always try to capture runner-side error details for FAILED,
-                                # even if DB status is already FAILED (status may have been set earlier without error).
+                                # Capture messages
                                 if (
                                     runner_status == ExperimentStatus.FAILED.value
                                     and runner_error
                                     and not getattr(experiment_model, "error_message", None)
                                 ):
                                     update_kwargs["error_message"] = str(runner_error)
+                                if runner_status == ExperimentStatus.TERMINATED.value and runner_status_message:
+                                    update_kwargs["status_message"] = str(runner_status_message)
+                                    update_kwargs["error_message"] = None
                                 if runner_status != experiment_model.status or update_kwargs:
                                     await self.db_service.update_experiment_status(
                                         experiment_id, runner_status, **update_kwargs
@@ -284,6 +288,7 @@ class ExperimentService:
                 "status": experiment_model.status,
                 "updated_at": experiment_model.updated_at.isoformat(),
                 "runner_id": experiment_model.config.get("assigned_runner_id"),
+                "status_message": getattr(experiment_model, "status_message", None),
                 "error_message": experiment_model.error_message,
             }
 
@@ -305,11 +310,29 @@ class ExperimentService:
             program_object = f"{base_prefix}best_program.py"
             validation_object = f"{base_prefix}validate.py"
             archive_object = f"{base_prefix}results.zip"
+            best_chain_config_object = f"{base_prefix}best_chain_config.json"
+            initial_chain_config_object = f"{base_prefix}initial_chain_config.json"
 
             # Optional presigned URLs for convenience (short expiration)
             plot_url = await self.storage_service.get_presigned_url(plot_object, expires_in_seconds=120)
             program_url = await self.storage_service.get_presigned_url(program_object, expires_in_seconds=120)
             archive_url = await self.storage_service.get_presigned_url(archive_object, expires_in_seconds=120)
+
+            artifacts: Dict[str, Any] = {
+                "plot_image_s3": plot_object,
+                "best_program_s3": program_object,
+                "validation_s3": validation_object,
+                "archive_s3": archive_object,
+                "plot_url": plot_url,
+                "best_program_url": program_url,
+                "archive_url": archive_url,
+            }
+
+            # Include chain config artifacts if they exist (chain experiments)
+            if await self.storage_service.object_exists(best_chain_config_object):
+                artifacts["best_chain_config_s3"] = best_chain_config_object
+            if await self.storage_service.object_exists(initial_chain_config_object):
+                artifacts["initial_chain_config_s3"] = initial_chain_config_object
 
             payload: Dict[str, Any] = {
                 "experiment_id": experiment_id,
@@ -317,16 +340,16 @@ class ExperimentService:
                 "metrics": experiment_model.metrics or {},
                 "completed_at": experiment_model.completed_at.isoformat() if experiment_model.completed_at else None,
                 "runner_id": experiment_model.config.get("assigned_runner_id"),
-                "artifacts": {
-                    "plot_image_s3": plot_object,
-                    "best_program_s3": program_object,
-                    "validation_s3": validation_object,
-                    "archive_s3": archive_object,
-                    "plot_url": plot_url,
-                    "best_program_url": program_url,
-                    "archive_url": archive_url,
-                },
+                "artifacts": artifacts,
             }
+
+            # Include best chain config from DB best_result if available
+            best_result = experiment_model.best_result or {}
+            if best_result.get("best_chain_config"):
+                payload["best_chain_config"] = best_result["best_chain_config"]
+            if best_result.get("initial_chain_config"):
+                payload["initial_chain_config"] = best_result["initial_chain_config"]
+
             return payload
 
         except Exception as e:
@@ -379,6 +402,7 @@ class ExperimentService:
                 ExperimentStatus.INITIALIZING.value,
                 ExperimentStatus.PREPARING.value,
                 ExperimentStatus.RUNNING.value,
+                ExperimentStatus.CANCELLED.value,
             }:
                 msg = f"Cannot start experiment in status '{status}'"
                 logger.warning(f"{experiment_id}: {msg}")
@@ -443,10 +467,13 @@ class ExperimentService:
                 "n_clusters": experiment_model.config.get("parameters", {}).get("n_clusters"),
                 "llm_model": experiment_model.config.get("llm_model", "local-inference"),
                 "prompt_llm_model": experiment_model.config.get("prompt_llm_model"),
+                # CARL: chain_llm_model stored in parameters by carl-chains route
+                "chain_llm_model": experiment_model.config.get("parameters", {}).get("chain_llm_model"),
                 "max_iterations": experiment_model.config.get("max_iterations", 100),
-                "timeout_seconds": experiment_model.config.get("timeout_seconds", 3600),
                 "dataset_size": experiment_model.config.get("dataset_size"),
                 "test_size": experiment_model.config.get("test_size"),
+                "enable_memory": experiment_model.config.get("parameters", {}).get("enable_memory", False),
+                "memory_namespace": experiment_model.config.get("parameters", {}).get("memory_namespace"),
             }
 
             # Remove None values from config

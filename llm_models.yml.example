@@ -17,8 +17,6 @@ defaults:
 models:
   - id: gigachat-max-2
     label: GigaChat Max 2
-    provider: gigachat
-    supports: [chat, json]
     ui:
       description: "Higher quality, remote provider"
       tags: [recommended]
@@ -36,8 +34,6 @@ models:
 
   - id: deepseek-r1t-chimera
     label: DeepSeek R1T Chimera
-    provider: deepseek
-    supports: [chat, json]
     ui:
       description: "Fallback model"
       tags: [default]

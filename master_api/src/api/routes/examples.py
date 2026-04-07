@@ -103,17 +103,42 @@ def _extract_prompt_template_from_sh(create_sh_path: str) -> str:
     return ""
 
 
+_ML_TASK_TYPES = {"classification", "regression", "clustering"}
+
+_ML_ALLOWED_PRESETS = {
+    "bike_sharing_day",
+    "boston_housing",
+    "california_housing",
+    "iris",
+    "iris_clustering",
+}
+
+
 @router.get("/api/v1/examples/")
 async def list_examples():
-    """List available example specs in data_examples directory."""
+    """List available ML example specs in data_examples directory.
+
+    Only specs whose ``task_type`` belongs to the classic ML set
+    (classification, regression, clustering) are returned; CARL /
+    prompt specs that happen to live in the same folder are excluded.
+    """
     base = _examples_dir()
     try:
         entries: List[Dict[str, str]] = []
         for fname in os.listdir(base):
-            if fname.endswith("_spec.json"):
-                name = fname[: -len("_spec.json")]
-                entries.append({"name": name, "label": _humanize(name)})
-        # stable order
+            if not fname.endswith("_spec.json"):
+                continue
+            spec_path = os.path.join(base, fname)
+            try:
+                with open(spec_path, "r", encoding="utf-8") as f:
+                    spec = json.load(f)
+                task_type = (spec.get("task_type") or "").lower()
+            except Exception:
+                task_type = ""
+            name = fname[: -len("_spec.json")]
+            if task_type not in _ML_TASK_TYPES or name not in _ML_ALLOWED_PRESETS:
+                continue
+            entries.append({"name": name, "label": _humanize(name)})
         entries.sort(key=lambda x: x["label"])
         return {"examples": entries}
     except Exception as e:

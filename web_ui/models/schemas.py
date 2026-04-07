@@ -41,6 +41,7 @@ class ExperimentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    TERMINATED = "terminated"
     STOPPED = "stopped"
     PENDING = "pending"
     UNKNOWN = "unknown"
@@ -114,6 +115,7 @@ class ExperimentSummary(BaseModel):
     best_fitness: Optional[float] = None
     best_generations: Optional[int] = None
     best_program: Optional[str] = None
+    token_usage: Optional[Dict[str, Any]] = None
 
 
 class ApiError(BaseModel):

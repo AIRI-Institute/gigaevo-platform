@@ -231,6 +231,20 @@ class CreatePromptExperimentComponent(BaseComponent):
                                 interactive=True,
                             )
 
+            gr.Markdown("### 🧠 Memory Configuration")
+            with gr.Row():
+                enable_memory_checkbox = gr.Checkbox(
+                    label="Enable Memory Retrieval",
+                    value=False,
+                    info="Retrieve relevant ideas from memory bank during evolution mutations",
+                )
+            with gr.Row():
+                memory_namespace_input = gr.Textbox(
+                    label="Memory Namespace",
+                    placeholder="Optional; defaults to experiment ID",
+                    info="Optional. Used only when memory retrieval is enabled; leave empty to use the experiment ID.",
+                )
+
             with gr.Row():
                 create_btn = gr.Button("Create Experiment", variant="primary", size="lg")
                 clean_btn = gr.Button("🧹 Clean Form", variant="secondary", size="lg")
@@ -292,6 +306,8 @@ class CreatePromptExperimentComponent(BaseComponent):
                 btn_gsm8k,
                 btn_sent,
                 btn_xsum,
+                enable_memory_checkbox,
+                memory_namespace_input,
             )
 
         return component
@@ -342,6 +358,8 @@ class CreatePromptExperimentComponent(BaseComponent):
             btn_gsm8k,
             btn_sent,
             btn_xsum,
+            enable_memory_checkbox,
+            memory_namespace_input,
         ) = inputs
 
         column_buttons = [col_btn_1, col_btn_2, col_btn_3, col_btn_4, col_btn_5, col_btn_6, col_btn_7, col_btn_8]
@@ -749,6 +767,8 @@ Answer: [expected answer]"""
                 preset_data_path_state,
                 dataset_size_input,
                 test_size_input,
+                enable_memory_checkbox,
+                memory_namespace_input,
             ],
             outputs=create_output,
         )
@@ -1009,6 +1029,8 @@ Answer: [expected answer]"""
         preset_data_path: str,
         dataset_size: Optional[float],
         test_size: float,
+        enable_memory: bool = False,
+        memory_namespace: str = "",
     ) -> str:
         """Create a new prompt-based experiment using the /prompts endpoint.
 
@@ -1176,7 +1198,10 @@ Answer: [expected answer]"""
                 "llm_model": llm_model,
                 "prompt_llm_model": prompt_llm_model,
                 "max_iterations": max_iterations,
+                "enable_memory": bool(enable_memory),
             }
+            if str(memory_namespace or "").strip():
+                prompt_experiment_data["memory_namespace"] = str(memory_namespace).strip()
 
             if dataset_size is not None and dataset_size > 0:
                 prompt_experiment_data["dataset_size"] = int(dataset_size)
@@ -1188,7 +1213,8 @@ Answer: [expected answer]"""
             if "error" in result:
                 return f"Error: {result['error']}"
 
-            return f"✅ Prompt experiment '{name}' created successfully with ID: {result['id']}\nFile uploaded to storage: {data_path}\nTarget: {target_field}\nValidation type: {validation_type}\nTemplate placeholders: {len(re.findall(r'\{([^}]+)\}', base_prompt))}"
+            placeholder_count = len(re.findall(r"\{([^}]+)\}", base_prompt))
+            return f"✅ Prompt experiment '{name}' created successfully with ID: {result['id']}\nFile uploaded to storage: {data_path}\nTarget: {target_field}\nValidation type: {validation_type}\nTemplate placeholders: {placeholder_count}"
 
         except Exception as e:
             logger.error(f"Error creating prompt experiment: {e}")

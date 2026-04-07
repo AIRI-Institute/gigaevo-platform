@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
@@ -14,11 +16,16 @@ from src.api.routes import experiments, tasks, workers
 from src.config import load_config
 from src.services.experiment_service import ExperimentService
 from src.services.gigavolve_service import GigaEvolveService
+from src.services.redis_client import close_redis
+from src.services.task_repository import TaskRepository
+from src.services.task_service import TaskService
+from src.services.worker_service import WorkerService
 from src.workers.task_worker import TaskWorker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 # Global services
 gigavolve_service = None
@@ -31,7 +38,8 @@ _repo_clone_task = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
-    global gigavolve_service, _background_worker_task, _background_worker, _results_collection_task, _repo_clone_task
+    global gigavolve_service, task_repository, task_service, worker_service
+    global _background_worker_task, _background_worker, _results_collection_task
     # Startup
     logger.info("Starting GigaEvo Platform Runner API...")
 
@@ -40,31 +48,17 @@ async def lifespan(app: FastAPI):
 
     cfg = load_config()
 
-    # Clone the repository in background so API becomes healthy fast.
-    # /health reports repository readiness separately.
-    async def _clone_repo_background():
-        try:
-            logger.info("Cloning GigaEvolve repository (background)...")
-            clone_success = await gigavolve_service.clone_repository(force_refresh=cfg.gigavolve.repo_force_refresh)
-            if clone_success:
-                repo_info = await gigavolve_service.get_repository_info()
-                logger.info(f"GigaEvolve repository ready: {repo_info}")
-            else:
-                logger.error("Failed to clone GigaEvolve repository")
-        except Exception as e:
-            logger.error(f"Background repo clone failed: {e}")
-
-    try:
-        _repo_clone_task = asyncio.create_task(_clone_repo_background())
-    except Exception as e:
-        logger.warning(f"Failed to start background repo clone task: {e}")
-
     # Initialize ExperimentService (singleton) and register in routes
     logger.info("Initializing ExperimentService (singleton)")
-    experiment_service = ExperimentService()
+    task_repository = TaskRepository()
+    task_service = TaskService(task_repository)
+    worker_service = WorkerService()
+    experiment_service = ExperimentService(task_repository)
     try:
         # Register the singleton for dependency in experiment routes
         experiments.set_experiment_service(experiment_service)
+        tasks.set_task_service(task_service)
+        workers.set_worker_service(worker_service)
         logger.info("ExperimentService registered")
     except Exception as e:
         logger.error(f"Failed to register ExperimentService: {e}")
@@ -76,6 +70,9 @@ async def lifespan(app: FastAPI):
         _background_worker = TaskWorker(
             worker_id=cfg.worker.worker_id,
             name="background-worker",
+            gigavolve_service=gigavolve_service,
+            task_repository=task_repository,
+            experiment_service=experiment_service,
         )
         _background_worker_task = asyncio.create_task(_background_worker.start())
         logger.info(f"Started background TaskWorker id={cfg.worker.worker_id}")
@@ -102,32 +99,36 @@ async def lifespan(app: FastAPI):
                             logger.debug(
                                 f"Plot generation failed for {exp_id}: {result.get('stderr') or result.get('error')}"
                             )
-                            continue
+                        else:
+                            png_path_str = result.get("output_png_file")
+                            png_path = Path(png_path_str) if png_path_str else None
 
-                        png_path_str = result.get("output_png_file")
-                        png_path = Path(png_path_str) if png_path_str else None
+                            result = await gigavolve_service.generate_evolution_report(exp_id, out_subfolder)
+                            if not result.get("success"):
+                                logger.debug(
+                                    f"Report generation failed for {exp_id}: {result.get('stderr') or result.get('error')}"
+                                )
+                            else:
+                                report_path_str = result.get("output_json_file")
+                                report_path = Path(report_path_str) if report_path_str else None
 
-                        # Save evolution report
-                        result = await gigavolve_service.generate_evolution_report(exp_id, out_subfolder)
-                        if not result.get("success"):
-                            logger.debug(
-                                f"Report generation failed for {exp_id}: {result.get('stderr') or result.get('error')}"
-                            )
-                            continue
+                                artifacts = []
+                                if png_path and png_path.exists():
+                                    artifacts.append({"src": png_path, "dst": "metrics_plot.png"})
+                                if report_path and report_path.exists():
+                                    artifacts.append({"src": report_path, "dst": "evolution_report.json"})
+                                if artifacts:
+                                    await experiment_service.save_artifacts_to_workspace(exp_id, artifacts)
+                                    await experiment_service.upload_artifacts_to_storage(exp_id, artifacts)
 
-                        report_path_str = result.get("output_json_file")
-                        report_path = Path(report_path_str) if report_path_str else None
+                        # Always try chain feedback upload (does not depend on plot/report success)
+                        try:
+                            uploaded = await experiment_service.collect_and_upload_chain_feedback(exp_id)
+                            if uploaded:
+                                logger.debug(f"Uploaded {uploaded} chain feedback file(s) for {exp_id}")
+                        except Exception as feedback_e:
+                            logger.warning(f"Failed to upload chain feedback for {exp_id}: {feedback_e}")
 
-                        # Handle artifacts
-                        artifacts = []
-                        if png_path and png_path.exists():
-                            artifacts.append({"src": png_path, "dst": "metrics_plot.png"})
-                        if report_path and report_path.exists():
-                            artifacts.append({"src": report_path, "dst": "evolution_report.json"})
-                        if not artifacts:
-                            continue
-                        await experiment_service.save_artifacts_to_workspace(exp_id, artifacts)
-                        await experiment_service.upload_artifacts_to_storage(exp_id, artifacts)
                     except Exception as inner_e:
                         logger.warning(f"Results collection loop error for {exp_id}: {inner_e}")
             except Exception as loop_e:
@@ -147,8 +148,9 @@ async def lifespan(app: FastAPI):
 
     # Close Experiment service
     try:
-        await experiment_service.close()
         experiments.set_experiment_service(None)
+        tasks.set_task_service(None)
+        workers.set_worker_service(None)
         logger.info("ExperimentService closed")
     except Exception as e:
         logger.warning(f"Failed to close ExperimentService: {e}")
@@ -173,14 +175,9 @@ async def lifespan(app: FastAPI):
                 await _results_collection_task
             except asyncio.CancelledError:
                 pass
-        if _repo_clone_task:
-            _repo_clone_task.cancel()
-            try:
-                await _repo_clone_task
-            except asyncio.CancelledError:
-                pass
     except Exception as e:
         logger.warning(f"Failed to stop background worker: {e}")
+    await close_redis()
 
 
 app = FastAPI(
@@ -234,26 +231,6 @@ async def get_repository_status():
 
     repo_info = await gigavolve_service.get_repository_info()
     return repo_info
-
-
-@app.post("/api/v1/repository/refresh")
-async def refresh_repository():
-    """Force refresh the GigaEvolve repository"""
-    global gigavolve_service
-
-    if not gigavolve_service:
-        return {"error": "GigaEvolve service not initialized"}
-
-    logger.info("Force refreshing GigaEvolve repository...")
-    clone_success = await gigavolve_service.clone_repository(force_refresh=True)
-
-    if clone_success:
-        repo_info = await gigavolve_service.get_repository_info()
-        logger.info(f"Repository refreshed successfully: {repo_info}")
-        return {"success": True, "repository": repo_info}
-    else:
-        logger.error("Failed to refresh repository")
-        return {"success": False, "error": "Failed to clone repository"}
 
 
 if __name__ == "__main__":

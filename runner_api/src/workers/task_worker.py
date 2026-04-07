@@ -12,26 +12,32 @@ from redis.asyncio import Redis
 from ..config import load_config
 from ..models.task import Task, TaskStatus, TaskType
 from ..models.worker import WorkerStatus
+from ..services.experiment_service import ExperimentService
 from ..services.gigavolve_service import GigaEvolveService
+from ..services.redis_client import get_redis
+from ..services.task_repository import TaskRepository
 
 logger = logging.getLogger(__name__)
 
 
 class TaskWorker:
-    def __init__(self, worker_id: str, name: str):
+    def __init__(
+        self,
+        worker_id: str,
+        name: str,
+        gigavolve_service: GigaEvolveService,
+        task_repository: TaskRepository,
+        experiment_service: Optional[ExperimentService] = None,
+    ):
         self.worker_id = worker_id
         self.name = name
         self.status = WorkerStatus.IDLE
         self.current_task: Optional[Task] = None
-        self.gigavolve_service = GigaEvolveService()
+        self.gigavolve_service = gigavolve_service
+        self.task_repository = task_repository
+        self.experiment_service = experiment_service
         self.config = load_config()
         self._running = False
-        self._redis: Optional[Redis] = None
-
-    async def _get_redis(self) -> Redis:
-        if self._redis is None:
-            self._redis = Redis.from_url(self.config.redis.url, decode_responses=True)
-        return self._redis
 
     async def start(self):
         """Start the worker"""
@@ -63,43 +69,20 @@ class TaskWorker:
         """Stop the worker"""
         self._running = False
         if self.current_task:
-            # TODO: Mark current task as cancelled
-            pass
+            await self.task_repository.cancel_task(self.current_task.id)
         logger.info(f"Worker {self.worker_id} stopped")
 
     async def _get_next_task(self) -> Optional[Task]:
         """Get next task from Redis queue"""
-        redis = await self._get_redis()
         # Blocking pop from right (acts as queue FIFO if producers LPUSH)
         timeout = max(1, int(self.config.worker.polling_interval))
         logger.debug(f"Worker {self.worker_id} waiting for task from task_queue (timeout={timeout}s)")
-        popped = await redis.brpop("task_queue", timeout=timeout)
-        if not popped:
+        task = await self.task_repository.claim_next_task(timeout=timeout)
+        if not task:
             logger.debug(f"Worker {self.worker_id} no task available after {timeout}s timeout")
             return None
-        logger.info(f"Worker {self.worker_id} got task from queue: {popped}")
-        _, task_id = popped
-        task_key = f"task:{task_id}"
-        data = await redis.hgetall(task_key)
-        if not data:
-            return None
-        # If task was already cancelled (e.g., experiment stop), skip it
-        if data.get("status") == TaskStatus.CANCELLED.value:
-            return None
-        try:
-            task = Task(
-                id=task_id,  # pydantic will coerce UUID
-                experiment_id=data.get("experiment_id"),
-                task_type=data.get("task_type"),
-                status=TaskStatus(data.get("status", TaskStatus.QUEUED.value)),
-                parameters=json.loads(data.get("parameters", "{}") or "{}"),
-                result=json.loads(data.get("result", "") or "null"),
-                error_message=data.get("error_message") or None,
-                progress=float(data.get("progress", 0.0)),
-            )
-            return task
-        except Exception:
-            return None
+        logger.info(f"Worker {self.worker_id} got task from queue: {task.id}")
+        return task
 
     async def _execute_task(self, task: Task):
         """Execute a task"""
@@ -111,7 +94,7 @@ class TaskWorker:
 
         try:
             # Early cancellation/status check before attempting to run
-            if await self._is_task_cancelled(str(task.id)):
+            if await self.task_repository.is_task_cancelled(str(task.id)):
                 task.status = TaskStatus.CANCELLED
                 task.error_message = task.error_message or "Cancelled before execution"
                 return
@@ -120,18 +103,16 @@ class TaskWorker:
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.now(timezone.utc)
             task.worker_id = self.worker_id
-            await self._update_task_in_redis(task)
+            await self.task_repository.persist_task_state(task)
             await self._update_worker_status(WorkerStatus.BUSY, current_task_id=str(task.id))
 
             # Check once more right after RUNNING update for a late-arriving cancel
-            if await self._is_task_cancelled(str(task.id)):
+            if await self.task_repository.is_task_cancelled(str(task.id)):
                 task.status = TaskStatus.CANCELLED
                 task.error_message = task.error_message or "Cancelled before execution"
                 return
 
-            if task.task_type == TaskType.CLONE_REPO:
-                await self._handle_clone_repo(task)
-            elif task.task_type == TaskType.GENERATE_CODE:
+            if task.task_type == TaskType.GENERATE_CODE:
                 await self._handle_generate_code(task)
             elif task.task_type == TaskType.RUN_EXPERIMENT:
                 await self._handle_run_experiment(task)
@@ -147,15 +128,21 @@ class TaskWorker:
 
         finally:
             # Persist final state
-            task.completed_at = datetime.now(timezone.utc)
-            if task.status == TaskStatus.COMPLETED:
+            was_cancelled = await self.task_repository.is_task_cancelled(str(task.id))
+            if was_cancelled and task.status != TaskStatus.CANCELLED:
+                task.status = TaskStatus.CANCELLED
+                if not task.error_message:
+                    task.error_message = "Cancelled"
+            if not was_cancelled and task.status == TaskStatus.COMPLETED:
                 task.progress = 100.0
-            await self._update_task_in_redis(task)
+            if task.completed_at is None:
+                task.completed_at = datetime.now(timezone.utc)
+            await self.task_repository.persist_task_state(task)
             self.current_task = None
             self.status = WorkerStatus.IDLE
             # increment tasks completed counter best-effort
             try:
-                redis = await self._get_redis()
+                redis = await get_redis()
                 await redis.hincrby(f"worker:{self.worker_id}", "total_tasks_completed", 1)
             except Exception:
                 pass
@@ -172,30 +159,6 @@ class TaskWorker:
             except Exception:
                 # Best-effort only; failures here should not break worker loop
                 pass
-
-    async def _update_task_in_redis(self, task: Task) -> None:
-        redis = await self._get_redis()
-        key = f"task:{task.id}"
-        mapping = {
-            "status": task.status.value,
-            "started_at": task.started_at.isoformat() if task.started_at else "",
-            "completed_at": task.completed_at.isoformat() if task.completed_at else "",
-            "worker_id": task.worker_id or "",
-            "progress": str(task.progress),
-            "result": json.dumps(task.result) if task.result is not None else "",
-            "error_message": task.error_message or "",
-        }
-        await redis.hset(key, mapping=mapping)
-
-    async def _handle_clone_repo(self, task: Task):
-        """Handle repository cloning task"""
-        success = await self.gigavolve_service.clone_repository()
-        if success:
-            task.status = TaskStatus.COMPLETED
-            task.result = {"success": True}
-        else:
-            task.status = TaskStatus.FAILED
-            task.error_message = "Failed to clone repository"
 
     async def _handle_generate_code(self, task: Task):
         """Handle code generation task"""
@@ -225,11 +188,11 @@ class TaskWorker:
             # Try to read evolution_report.json to get actual iterations
             # Check multiple possible locations for the report
             clone_path = Path(self.gigavolve_service.config.clone_path).resolve()
-            
+
             # Try outputs/{experiment_id}/evolution_report.json first
             output_dir = clone_path / "outputs" / experiment_id
             report_path = output_dir / "evolution_report.json"
-            
+
             # If not found, try outputs/exp_{experiment_id}/evolution_report.json
             if not report_path.exists() and not experiment_id.startswith("exp_"):
                 output_dir = clone_path / "outputs" / f"exp_{experiment_id}"
@@ -245,14 +208,18 @@ class TaskWorker:
                     # Try multiple possible output subfolders
                     possible_subfolders = [
                         experiment_id,
-                        f"exp_{experiment_id}" if not experiment_id.startswith("exp_") else experiment_id.replace("exp_", ""),
+                        f"exp_{experiment_id}"
+                        if not experiment_id.startswith("exp_")
+                        else experiment_id.replace("exp_", ""),
                     ]
-                    
+
                     report_generated = False
                     for subfolder in possible_subfolders:
                         try:
                             out_subfolder = f"outputs/{subfolder}"
-                            result = await self.gigavolve_service.generate_evolution_report(experiment_id, out_subfolder)
+                            result = await self.gigavolve_service.generate_evolution_report(
+                                experiment_id, out_subfolder
+                            )
                             if result.get("success"):
                                 # Report generated, try reading it
                                 generated_path = result.get("output_json_file")
@@ -264,7 +231,7 @@ class TaskWorker:
                         except Exception as e:
                             logger.debug(f"Failed to generate report in {out_subfolder} for {experiment_id}: {e}")
                             continue
-                    
+
                     if not report_generated:
                         # Try the standard location again after generation attempt
                         report_path = output_dir / "evolution_report.json"
@@ -292,21 +259,23 @@ class TaskWorker:
                         logger.warning(f"Failed to read CSV report for {experiment_id}: {e}")
 
                 # Try to generate CSV report from Redis data as a last resort
-                logger.info(
-                    f"Report and CSV not found for {experiment_id}, attempting to generate CSV from Redis..."
-                )
+                logger.info(f"Report and CSV not found for {experiment_id}, attempting to generate CSV from Redis...")
                 try:
                     # Try multiple possible output subfolders
                     possible_subfolders = [
                         experiment_id,
-                        f"exp_{experiment_id}" if not experiment_id.startswith("exp_") else experiment_id.replace("exp_", ""),
+                        f"exp_{experiment_id}"
+                        if not experiment_id.startswith("exp_")
+                        else experiment_id.replace("exp_", ""),
                     ]
-                    
+
                     for subfolder in possible_subfolders:
                         try:
                             out_subfolder = f"outputs/{subfolder}"
                             # Use generate_evolution_report which will create both CSV and JSON
-                            result = await self.gigavolve_service.generate_evolution_report(experiment_id, out_subfolder)
+                            result = await self.gigavolve_service.generate_evolution_report(
+                                experiment_id, out_subfolder
+                            )
                             if result.get("success"):
                                 # Check if JSON was generated and can be read
                                 generated_json = result.get("output_json_file")
@@ -323,13 +292,14 @@ class TaskWorker:
                                         return is_complete, actual_iterations
                                     except Exception as e:
                                         logger.debug(f"Failed to read generated JSON for {experiment_id}: {e}")
-                                
+
                                 # Also try CSV (it's generated as intermediate file)
                                 clone_path = Path(self.gigavolve_service.config.clone_path).resolve()
                                 csv_path = clone_path / out_subfolder / "evolution_report.csv"
                                 if csv_path.exists():
                                     try:
                                         import pandas as pd
+
                                         df = pd.read_csv(csv_path)
                                         if "metadata_iteration" in df.columns:
                                             _iter_series = pd.to_numeric(df["metadata_iteration"], errors="coerce")
@@ -342,7 +312,7 @@ class TaskWorker:
                                                 return is_complete, actual_iterations
                                     except Exception as e:
                                         logger.debug(f"Failed to read generated CSV for {experiment_id}: {e}")
-                                
+
                                 # If JSON was generated, use it
                                 if generated_json and Path(generated_json).exists():
                                     report_path = Path(generated_json)
@@ -387,16 +357,16 @@ class TaskWorker:
         logger.info(f"Processing RUN_EXPERIMENT task for experiment {experiment_id}")
 
         async def _cancel_check() -> bool:
-            return await self._is_task_cancelled(str(task.id))
+            return await self.task_repository.is_task_cancelled(str(task.id))
 
         logger.info(f"Calling gigavolve_service.run_experiment for {experiment_id}")
         result = await self.gigavolve_service.run_experiment(experiment_id, config, cancel_check=_cancel_check)
         logger.info(f"run_experiment returned for {experiment_id}: {result}")
 
-        # Check if experiment timed out - this should not be treated as successful completion
+        # Check if experiment timed out
         if result and result.get("timed_out", False):
-            task.status = TaskStatus.FAILED
-            task.error_message = result.get("output", "Experiment reached time limit before completion")
+            task.status = TaskStatus.TERMINATED
+            task.error_message = None
             task.result = result
         elif result and result.get("success", False):
             # Process completed with exit code 0, but verify it reached expected iterations
@@ -437,6 +407,15 @@ class TaskWorker:
                 task.status = TaskStatus.FAILED
                 task.error_message = err_msg
 
+        # Upload chain feedback to storage even after run ends (loop only processes RUNNING experiments)
+        if self.experiment_service:
+            try:
+                n = await self.experiment_service.collect_and_upload_chain_feedback(experiment_id)
+                if n:
+                    logger.info(f"Post-run chain feedback upload for {experiment_id}: {n} file(s)")
+            except Exception as fb_e:
+                logger.warning(f"Post-run chain feedback upload failed for {experiment_id}: {fb_e}")
+
     async def _handle_collect_results(self, task: Task):
         """Handle results collection task"""
         # The periodic analysis loop in main.py handles plot generation and uploads.
@@ -445,7 +424,7 @@ class TaskWorker:
 
     async def _should_continue_running(self) -> bool:
         """Check for a stop signal from Redis."""
-        redis = await self._get_redis()
+        redis = await get_redis()
         data = await redis.hgetall(f"worker:{self.worker_id}")
         if data.get("stop_requested") == "1":
             await redis.hset(f"worker:{self.worker_id}", "status", WorkerStatus.OFFLINE.value)
@@ -454,7 +433,7 @@ class TaskWorker:
 
     async def _heartbeat(self) -> None:
         """Update last heartbeat timestamp in Redis and ensure registration."""
-        redis = await self._get_redis()
+        redis = await get_redis()
         key = f"worker:{self.worker_id}"
         await redis.hset(key, "last_heartbeat", datetime.now(timezone.utc).isoformat())
         await redis.sadd("workers", self.worker_id)
@@ -462,7 +441,7 @@ class TaskWorker:
     async def _update_worker_status(self, status: WorkerStatus, current_task_id: Optional[str]) -> None:
         """Update worker status/name and current task in Redis."""
         self.status = status
-        redis = await self._get_redis()
+        redis = await get_redis()
         key = f"worker:{self.worker_id}"
         mapping = {
             "id": self.worker_id,
@@ -476,15 +455,9 @@ class TaskWorker:
         pipe.sadd("workers", self.worker_id)
         await pipe.execute()
 
-    async def _is_task_cancelled(self, task_id: str) -> bool:
-        """Check if task status has been set to CANCELLED in Redis."""
-        redis = await self._get_redis()
-        val = await redis.hget(f"task:{task_id}", "status")
-        return val == TaskStatus.CANCELLED.value
-
     async def _maybe_delete_after_cancel(self, task_id: str, experiment_id: str) -> None:
         """Delete task hash and references if flagged and status is CANCELLED."""
-        redis = await self._get_redis()
+        redis = await get_redis()
         key = f"task:{task_id}"
         data = await redis.hgetall(key)
         if not data:
@@ -492,6 +465,7 @@ class TaskWorker:
         if data.get("delete_after_cancel") == "1" and data.get("status") == TaskStatus.CANCELLED.value:
             pipe = redis.pipeline()
             pipe.delete(key)
+            pipe.srem("all_tasks", task_id)
             if experiment_id:
                 pipe.lrem(f"experiment:{experiment_id}:tasks", 0, task_id)
             await pipe.execute()
@@ -501,7 +475,7 @@ class TaskWorker:
         Update experiment:{id}:status hash based on the final RUN_EXPERIMENT task status.
         This keeps runner-side experiment status in sync with task outcome.
         """
-        redis = await self._get_redis()
+        redis = await get_redis()
         status_key = f"experiment:{experiment_id}:status"
         now = datetime.now(timezone.utc).isoformat()
         mapping = {}
@@ -509,12 +483,19 @@ class TaskWorker:
         if status == TaskStatus.COMPLETED:
             mapping["status"] = "completed"
             mapping["completed_at"] = now
+            mapping["status_message"] = ""
         elif status == TaskStatus.FAILED:
             mapping["status"] = "failed"
             mapping["completed_at"] = now
+            mapping["status_message"] = ""
+        elif status == TaskStatus.TERMINATED:
+            mapping["status"] = "terminated"
+            mapping["completed_at"] = now
+            mapping["status_message"] = "Time limit reached"
         elif status == TaskStatus.CANCELLED:
             mapping["status"] = "cancelled"
             mapping["stopped_at"] = now
+            mapping["status_message"] = ""
 
         if mapping:
             await redis.hset(status_key, mapping=mapping)

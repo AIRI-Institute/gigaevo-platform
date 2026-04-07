@@ -65,7 +65,7 @@ make deploy
 
 This will deploy with automated health checks:
 
-- **Infrastructure**: PostgreSQL, Kafka, Zookeeper, Redis (2 instances), MinIO
+- **Infrastructure**: PostgreSQL, Kafka (KRaft), Redis (2 instances), MinIO
 - **Applications**: Master API, Runner API, WebUI
 - **Networking**: Docker network and shared volumes
 - **Health Monitoring**: Automatic service health verification
@@ -98,6 +98,12 @@ make stop
 # Or:
 ./deploy.sh stop
 
+# Remove deploy containers and volumes
+./deploy.sh clean
+
+# Full cleanup for both dev and deploy
+make clean
+
 # Restart specific service
 make restart SERVICE=master-api
 make restart SERVICE=runner-api
@@ -110,12 +116,12 @@ make restart SERVICE=kafka
 
 ### Access Points
 
-- **WebUI**: http://localhost:7860
-- **Master API**: http://localhost:8000
-- **Runner API**: http://localhost:8001
-- **MinIO Console**: http://localhost:9001 (user: minioadmin, pass: minioadmin)
-- **Kafka Broker**: localhost:9092
-- **Kafka UI**: Available in dev mode at http://localhost:9000 (via `make dev`)
+- **WebUI**: `http://localhost:${WEB_UI_HOST_PORT}` (default `7860`)
+- **Master API**: `http://localhost:${MASTER_API_HOST_PORT}` (default `8000`)
+- **Runner API**: `http://localhost:${RUNNER_API_HOST_PORT}` (default `8001`)
+- **MinIO Console**: `http://localhost:${MINIO_CONSOLE_HOST_PORT}` (default `9001`; credentials come from `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`)
+- **Kafka Broker**: `localhost:${KAFKA_HOST_PORT}` (default `9092`)
+- **Kafka UI**: available in dev mode at `http://localhost:${KAFKA_UI_HOST_PORT}` (default `8080`)
 
 ### Runner pool size configuration
 
@@ -127,6 +133,45 @@ RUNNER_POOL_SIZE=3    # Number of runner instances (default: 1)
 ```
 
 The system automatically generates a `docker-compose.runner-pool.*.generated.yml` file with N runner services.
+All generated runner services reuse one shared runner image tagged from `COMPOSE_PROJECT_NAME`.
+
+### Environment configuration
+
+The main deployment-related environment variables for this repo are:
+
+- `COMPOSE_PROJECT_NAME` for Compose resource naming and the shared runner image tag
+- `GIGAEVO_NETWORK_NAME` for the shared Docker network used by the deploy stack
+- `GIGAEVO_CORE_REPO_URL` / `GIGAEVO_CORE_REF` for the baked `gigaevo-core` runner image inputs
+- `MEMORY_API_URL` for the external `gigaevo-memory` API endpoint as seen from runner containers
+- `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` for MinIO server and platform storage access
+- `*_HOST_PORT` values for published service ports
+
+`COMPOSE_PROJECT_NAME` is required for supported container flows.
+
+Example:
+
+```bash
+COMPOSE_PROJECT_NAME=gigaevo-platform
+GIGAEVO_NETWORK_NAME=gigaevo-platform-network
+MINIO_ROOT_USER=gigaevoadmin
+MINIO_ROOT_PASSWORD=change-this-minio-password
+POSTGRES_HOST_PORT=5432
+REDIS_HOST_PORT=6379
+REDIS_GIGAVOLVE_HOST_PORT=6380
+KAFKA_HOST_PORT=9092
+KAFKA_DOCKER_HOST_PORT=29092
+MASTER_API_HOST_PORT=8000
+RUNNER_API_HOST_PORT=8001
+WEB_UI_HOST_PORT=7860
+MINIO_API_HOST_PORT=9000
+MINIO_CONSOLE_HOST_PORT=9001
+KAFKA_UI_HOST_PORT=8080
+GIGAEVO_CORE_REPO_URL=https://github.com/FusionBrainLab/gigaevo-core
+GIGAEVO_CORE_REF=main
+MEMORY_API_URL=http://host.docker.internal:8002
+```
+
+`MEMORY_API_URL` must be reachable from runner containers. For local development, `http://host.docker.internal:8002` is the recommended default for an externally started `gigaevo-memory` API.
 
 ### Runner pool instance controls (WebUI)
 
@@ -136,8 +181,8 @@ With a **Compose-managed runner pool** (`RUNNER__MANAGE_CONTAINERS=false`, the d
 
 Requirements:
 
-- `master-api` has Docker access: mount `/var/run/docker.sock` (and ensure the container user can read/write it; otherwise run `master-api` as root or align the socket group).
-- Runner containers are started by Docker Compose (Master finds them via `com.docker.compose.service=runner-api-N` labels; set `COMPOSE_PROJECT_NAME` if you have multiple stacks with the same service names).
+- `master-api` has Docker CLI access via the host socket: mount `/var/run/docker.sock` (and ensure the container user can read/write it; otherwise run `master-api` as root or align the socket group).
+- Runner containers are started by Docker Compose (Master finds them via `com.docker.compose.service=runner-api-N` labels; keep `COMPOSE_PROJECT_NAME` and `GIGAEVO_NETWORK_NAME` aligned with this deployment).
 
 Security note: mounting the Docker socket grants the `master-api` container root-equivalent control over the host Docker engine.
 
@@ -185,6 +230,9 @@ The system uses these Kafka topics for coordination:
 ### Local Development Setup
 
 ```bash
+# Verify required local tools (docker, docker compose, python3)
+make check-tools
+
 # Install all dependencies
 make install
 
@@ -197,19 +245,23 @@ make web-ui        # WebUI on port 7860
 ### Container-Based Development
 
 ```bash
-# Development with hot reload (legacy architecture)
+# Development with hot reload (foreground)
 make dev
 
-# Production environment (legacy)
-make prod
+# Stop containers
+make stop
 
-# Clean up containers and volumes
-make docker-clean
+# Stop foreground session
+# Ctrl+C
+
+# Full cleanup (including volumes)
+make clean-dev
 ```
 
 ### Code Quality
 
 ```bash
+make check-runner-compose   # Validate the pool resolves one shared runner image
 make lint     # Run linting with ruff
 make format   # Format code with ruff
 make test     # Run tests (individual components)
@@ -234,8 +286,7 @@ make db-migrate   # Run database migrations
    - 8000: Master API
    - 8001: Runner API
    - 9000, 9001: MinIO
-   - 9092, 29092, 29093: Kafka
-   - 2181: Zookeeper
+   - 9092, 29092: Kafka
 
 2. **Deployment Issues**:
 
@@ -288,6 +339,8 @@ Key environment variables for Master API:
 - `STORAGE__ACCESS_KEY` - MinIO access key
 - `STORAGE__SECRET_KEY` - MinIO secret key
 
+In the provided Compose setup, `STORAGE__ACCESS_KEY` and `STORAGE__SECRET_KEY` are populated from `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`.
+
 ## 📊 Architecture Details
 
 ### Current Kafka-Based Architecture
@@ -315,6 +368,9 @@ The platform uses a modern microservices architecture with:
 4. Run tests and linting: `make test && make lint`
 5. Submit a pull request
 
+## 📎 Additional Docs
+
+- For deployment from a prebuilt image bundle, see [docs/bundle.md](docs/bundle.md).
 
 ## 📄 License
 

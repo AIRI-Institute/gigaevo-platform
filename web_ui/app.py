@@ -5,7 +5,7 @@ import gradio as gr
 from components import (
     CreateExperimentComponent,
     CreatePromptExperimentComponent,
-    CreateChainExperimentComponent,
+    CreateCARLExperimentComponent,
     ExperimentDetailsComponent,
     ExperimentResultsComponent,
     ExperimentsListComponent,
@@ -35,7 +35,7 @@ def create_interface():
         instance_manager=inst_manager,
         status_service=status_service,
     )
-    create_chain_experiment_comp = CreateChainExperimentComponent(
+    create_carl_experiment_comp = CreateCARLExperimentComponent(
         experiment_manager=exp_manager,
         instance_manager=inst_manager,
         status_service=status_service,
@@ -77,9 +77,9 @@ def create_interface():
             with gr.Tab("Create Prompt Experiment"):
                 create_prompt_experiment_comp.build()
 
-            # Tab 2: Create Chain Experiment
-            with gr.Tab("Create Chain Experiment"):
-                create_chain_experiment_comp.build()
+            # Tab 2: Create CARL Experiment
+            with gr.Tab("Create CARL Experiment"):
+                create_carl_experiment_comp.build()
 
             # Tab 3: Create Experiment
             with gr.Tab("Create ML Experiment"):

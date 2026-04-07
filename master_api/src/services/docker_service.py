@@ -317,6 +317,9 @@ class DockerService:
         if network_name:
             cmd.extend(["--network", network_name])
 
+        # Keep host.docker.internal usable on Linux for host-reachable services such as gigaevo-memory.
+        cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
+
         # Add environment variables
         for key, value in environment_vars.items():
             cmd.extend(["-e", f"{key}={value}"])

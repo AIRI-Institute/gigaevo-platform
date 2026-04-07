@@ -3,7 +3,7 @@
 from .base import BaseComponent
 from .create_experiment import CreateExperimentComponent
 from .create_prompt_experiment import CreatePromptExperimentComponent
-from .create_chain_experiment import CreateChainExperimentComponent
+from .create_carl_experiment import CreateCARLExperimentComponent
 from .experiment_details import ExperimentDetailsComponent
 from .experiment_results import ExperimentResultsComponent
 from .experiments_list import ExperimentsListComponent
@@ -14,7 +14,7 @@ __all__ = [
     "BaseComponent",
     "CreateExperimentComponent",
     "CreatePromptExperimentComponent",
-    "CreateChainExperimentComponent",
+    "CreateCARLExperimentComponent",
     "ExperimentsListComponent",
     "ExperimentDetailsComponent",
     "ExperimentResultsComponent",

@@ -8,26 +8,45 @@ set -e
 echo "🚀 Starting GigaEvo Platform Deployment..."
 
 RUNNER_POOL_COMPOSE_FILE="docker-compose.runner-pool.generated.yml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REDIS_DB_RESOLVER="${SCRIPT_DIR}/scripts/resolve_redis_databases.sh"
+ENV_FILE="${SCRIPT_DIR}/.env"
 
-# Load pool size defaults from .env if present (Compose uses .env, but this script also needs the values).
-if [ -f .env ]; then
-    if [ -z "${RUNNER_POOL_SIZE:-}" ]; then
-        RUNNER_POOL_SIZE=$(grep -E '^RUNNER_POOL_SIZE=' .env | tail -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
-        export RUNNER_POOL_SIZE
-    fi
-    if [ -z "${RUNNER_REDIS_DB_START:-}" ]; then
-        RUNNER_REDIS_DB_START=$(grep -E '^RUNNER_REDIS_DB_START=' .env | tail -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
-        export RUNNER_REDIS_DB_START
-    fi
-fi
+cd "${SCRIPT_DIR}"
+
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/scripts/container_env.sh"
+container_env_load_and_resolve "${ENV_FILE}"
+
+network_name() {
+    printf '%s' "${GIGAEVO_NETWORK_NAME:-gigaevo-network}"
+}
+
+build_runner_image() {
+    MODE=prod ENV_FILE="${ENV_FILE}" "${SCRIPT_DIR}/scripts/build_runner_image.sh"
+}
+
+resolve_runner_pool_env() {
+    export RUNNER_POOL_SIZE="${RUNNER_POOL_SIZE:-1}"
+    export RUNNER_REDIS_DB_START="${RUNNER_REDIS_DB_START:-1}"
+    REDIS_DATABASES="$(${REDIS_DB_RESOLVER})"
+    export REDIS_DATABASES
+}
+
+generate_runner_pool_compose() {
+    resolve_runner_pool_env
+    python3 generate_runner_pool_compose.py --mode deploy --output "${RUNNER_POOL_COMPOSE_FILE}"
+}
 
 # Function to check if Docker network exists
 create_network_if_not_exists() {
-    if ! docker network ls | grep -q "gigaevo-network"; then
-        echo "📡 Creating Docker network: gigaevo-network"
-        docker network create gigaevo-network
+    local net
+    net="$(network_name)"
+    if ! docker network inspect "${net}" >/dev/null 2>&1; then
+        echo "📡 Creating Docker network: ${net}"
+        docker network create "${net}"
     else
-        echo "📡 Docker network gigaevo-network already exists"
+        echo "📡 Docker network ${net} already exists"
     fi
 }
 
@@ -44,22 +63,7 @@ create_volume_if_not_exists() {
 # Function to start infrastructure services
 start_infrastructure() {
     echo "🏗️  Starting infrastructure services (PostgreSQL, Kafka, Redis, MinIO)..."
-    # Ensure Redis has enough logical DBs for the runner pool.
-    # IMPORTANT: never shrink this automatically (shrinking can break Redis RDB load if old DB indexes exist).
-    RUNNER_POOL_SIZE=${RUNNER_POOL_SIZE:-1}
-    RUNNER_REDIS_DB_START=${RUNNER_REDIS_DB_START:-1}
-    REDIS_DATABASES_MIN=${REDIS_DATABASES_MIN:-512}
-    export RUNNER_POOL_SIZE RUNNER_REDIS_DB_START
-    req_dbs=$((RUNNER_REDIS_DB_START + RUNNER_POOL_SIZE))
-    if [ "$req_dbs" -gt "$REDIS_DATABASES_MIN" ]; then
-        max_pool=$((REDIS_DATABASES_MIN - RUNNER_REDIS_DB_START))
-        echo "❌ ERROR: RUNNER_POOL_SIZE=${RUNNER_POOL_SIZE} exceeds Redis DB limit."
-        echo "   Required databases: RUNNER_REDIS_DB_START(${RUNNER_REDIS_DB_START}) + RUNNER_POOL_SIZE(${RUNNER_POOL_SIZE}) = ${req_dbs}"
-        echo "   Configured REDIS_DATABASES_MIN=${REDIS_DATABASES_MIN}"
-        echo "   Max supported RUNNER_POOL_SIZE is ${max_pool} (for RUNNER_REDIS_DB_START=${RUNNER_REDIS_DB_START})."
-        exit 1
-    fi
-    export REDIS_DATABASES="${REDIS_DATABASES_MIN}"
+    resolve_runner_pool_env
     docker compose -f docker-compose.kafka.yml up -d
 
     echo "⏳ Waiting for services to be healthy..."
@@ -67,7 +71,7 @@ start_infrastructure() {
 
     # Check service health
     echo "🔍 Checking service health..."
-    for service in postgres zookeeper kafka redis redis-gigavolve minio; do
+    for service in postgres kafka redis redis-gigavolve minio; do
         echo "Checking $service..."
         timeout 90s bash -c "until docker compose -f docker-compose.kafka.yml ps $service | grep -q 'healthy\|Up (healthy)'; do sleep 3; echo 'Still waiting for $service...'; done"
         echo "✅ $service is healthy"
@@ -77,22 +81,7 @@ start_infrastructure() {
 # Function to start application services
 start_applications() {
     echo "🎯 Starting application services..."
-
-    # Runner pool sizing and Redis DB count
-    RUNNER_POOL_SIZE=${RUNNER_POOL_SIZE:-1}
-    RUNNER_REDIS_DB_START=${RUNNER_REDIS_DB_START:-1}
-    REDIS_DATABASES_MIN=${REDIS_DATABASES_MIN:-512}
-    export RUNNER_POOL_SIZE RUNNER_REDIS_DB_START
-    req_dbs=$((RUNNER_REDIS_DB_START + RUNNER_POOL_SIZE))
-    if [ "$req_dbs" -gt "$REDIS_DATABASES_MIN" ]; then
-        max_pool=$((REDIS_DATABASES_MIN - RUNNER_REDIS_DB_START))
-        echo "❌ ERROR: RUNNER_POOL_SIZE=${RUNNER_POOL_SIZE} exceeds Redis DB limit."
-        echo "   Required databases: RUNNER_REDIS_DB_START(${RUNNER_REDIS_DB_START}) + RUNNER_POOL_SIZE(${RUNNER_POOL_SIZE}) = ${req_dbs}"
-        echo "   Configured REDIS_DATABASES_MIN=${REDIS_DATABASES_MIN}"
-        echo "   Max supported RUNNER_POOL_SIZE is ${max_pool} (for RUNNER_REDIS_DB_START=${RUNNER_REDIS_DB_START})."
-        exit 1
-    fi
-    export REDIS_DATABASES="${REDIS_DATABASES_MIN}"
+    resolve_runner_pool_env
 
     echo "📊 Starting Master API..."
     docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml up -d --build master-api
@@ -102,10 +91,13 @@ start_applications() {
     echo "✅ Master API is healthy"
 
     echo "🏃 Generating Runner API pool compose (N=${RUNNER_POOL_SIZE})..."
-    python3 generate_runner_pool_compose.py --mode deploy --output "${RUNNER_POOL_COMPOSE_FILE}"
+    generate_runner_pool_compose
+
+    echo "🏗️  Building shared Runner API image..."
+    build_runner_image
 
     echo "🏃 Starting Runner API pool..."
-    docker compose -f docker-compose.kafka.yml -f "${RUNNER_POOL_COMPOSE_FILE}" up -d --build
+    docker compose -f docker-compose.kafka.yml -f "${RUNNER_POOL_COMPOSE_FILE}" up -d --no-build
 
     echo "⏳ Waiting for Runner API pool to be healthy..."
     for i in $(seq 1 "${RUNNER_POOL_SIZE}"); do
@@ -129,14 +121,15 @@ show_status() {
     echo "🎉 GigaEvo Platform Deployment Complete!"
     echo ""
     echo "📋 Service URLs:"
-    echo "   • Master API:     http://localhost:8000"
-    echo "   • Runner API:     http://localhost:8001 (runner-api-1)"
-    echo "   • Web UI:         http://localhost:7860"
-    echo "   • MinIO Console:  http://localhost:9001"
+    echo "   • Master API:     http://localhost:${MASTER_API_HOST_PORT:-8000}"
+    echo "   • Runner API:     http://localhost:${RUNNER_API_HOST_PORT:-8001} (runner-api-1)"
+    echo "   • Web UI:         http://localhost:${WEB_UI_HOST_PORT:-7860}"
+    echo "   • MinIO Console:  http://localhost:${MINIO_CONSOLE_HOST_PORT:-9001}"
     echo ""
     echo "🔧 Management Commands:"
     echo "   • View logs:       docker compose -f docker-compose.kafka.yml logs -f [service]"
     echo "   • Stop all:        ./deploy.sh stop"
+    echo "   • Clean all:       ./deploy.sh clean"
     echo "   • Restart service:  ./deploy.sh restart [service]"
     echo ""
     echo "📊 Kafka Topics (for debugging):"
@@ -150,13 +143,18 @@ show_status() {
 # Function to stop services
 stop_services() {
     echo "🛑 Stopping all GigaEvo Platform services..."
-    if [ -f "${RUNNER_POOL_COMPOSE_FILE}" ]; then
-        docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml down
-    else
-        docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-api.yml -f docker-compose.web-ui.yml down
-    fi
-    docker compose -f docker-compose.kafka.yml down
+    generate_runner_pool_compose
+    docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml stop
     echo "✅ All services stopped"
+}
+
+# Function to remove services
+clean_services() {
+    echo "🧹 Removing all GigaEvo Platform containers and volumes..."
+    generate_runner_pool_compose
+    docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml down -v --remove-orphans
+    docker compose -f docker-compose.kafka.yml down -v --remove-orphans
+    echo "✅ All services removed"
 }
 
 # Function to restart a specific service
@@ -174,14 +172,10 @@ restart_service() {
             ;;
         "runner-api")
             echo "🔄 Restarting Runner API pool..."
-            RUNNER_POOL_SIZE=${RUNNER_POOL_SIZE:-1}
-            if [ -f "${RUNNER_POOL_COMPOSE_FILE}" ]; then
-                for i in $(seq 1 "${RUNNER_POOL_SIZE}"); do
-                    docker compose -f docker-compose.kafka.yml -f "${RUNNER_POOL_COMPOSE_FILE}" restart "runner-api-${i}"
-                done
-            else
-                docker compose -f docker-compose.kafka.yml -f docker-compose.runner-api.yml restart runner-api
-            fi
+            generate_runner_pool_compose
+            for i in $(seq 1 "${RUNNER_POOL_SIZE}"); do
+                docker compose -f docker-compose.kafka.yml -f "${RUNNER_POOL_COMPOSE_FILE}" restart "runner-api-${i}"
+            done
             ;;
         "web-ui")
             echo "🔄 Restarting Web UI..."
@@ -189,7 +183,7 @@ restart_service() {
             ;;
         "kafka")
             echo "🔄 Restarting Kafka infrastructure..."
-            docker compose -f docker-compose.kafka.yml restart kafka zookeeper
+            docker compose -f docker-compose.kafka.yml restart kafka
             ;;
         *)
             echo "❌ Unknown service: $service"
@@ -212,41 +206,35 @@ case "${1:-deploy}" in
     "stop")
         stop_services
         ;;
+    "clean")
+        clean_services
+        ;;
     "restart")
         restart_service $2
         ;;
     "status")
         echo "📊 Service Status:"
-        if [ -f "${RUNNER_POOL_COMPOSE_FILE}" ]; then
-            docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml ps
-        else
-            docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-api.yml -f docker-compose.web-ui.yml ps
-        fi
+        generate_runner_pool_compose
+        docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml ps
         ;;
     "logs")
         service=${2:-all}
         echo "📋 Showing logs for: $service"
+        generate_runner_pool_compose
         if [ "$service" = "all" ]; then
-            if [ -f "${RUNNER_POOL_COMPOSE_FILE}" ]; then
-                docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml logs -f
-            else
-                docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-api.yml -f docker-compose.web-ui.yml logs -f
-            fi
+            docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml logs -f
         else
-            if [ -f "${RUNNER_POOL_COMPOSE_FILE}" ]; then
-                docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml logs -f $service
-            else
-                docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f docker-compose.runner-api.yml -f docker-compose.web-ui.yml logs -f $service
-            fi
+            docker compose -f docker-compose.kafka.yml -f docker-compose.master-api.yml -f "${RUNNER_POOL_COMPOSE_FILE}" -f docker-compose.web-ui.yml logs -f $service
         fi
         ;;
     *)
         echo "❌ Unknown command: $1"
-        echo "Usage: $0 [deploy|stop|restart|status|logs] [service]"
+        echo "Usage: $0 [deploy|stop|clean|restart|status|logs] [service]"
         echo ""
         echo "Commands:"
         echo "  deploy           Deploy all services (default)"
-        echo "  stop            Stop all services"
+        echo "  stop             Stop all services without removing containers"
+        echo "  clean            Remove all services, containers, and volumes"
         echo "  restart [svc]    Restart specific service"
         echo "  status           Show service status"
         echo "  logs [svc]       Show service logs"

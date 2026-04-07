@@ -168,6 +168,7 @@ class StatusService:
             "healthy": "🟢",
             "degraded": "🟡",
             "unhealthy": "🔴",
+            "initializing": "🔄",
             "configured": "🟦",
             "disabled": "⚪",
             "not_configured": "⚪",

@@ -167,6 +167,20 @@ class CreateExperimentComponent(BaseComponent):
                     spec_preview_btn = gr.Button("Preview Spec JSON")
                     spec_preview_output = gr.Code(label="Spec JSON", language="json")
 
+            gr.Markdown("### 🧠 Memory Configuration")
+            with gr.Row():
+                enable_memory_checkbox = gr.Checkbox(
+                    label="Enable Memory Retrieval",
+                    value=False,
+                    info="Retrieve relevant ideas from memory bank during evolution mutations",
+                )
+            with gr.Row():
+                memory_namespace_input = gr.Textbox(
+                    label="Memory Namespace",
+                    placeholder="Optional; defaults to experiment ID",
+                    info="Optional. Used only when memory retrieval is enabled; leave empty to use the experiment ID.",
+                )
+
             with gr.Row():
                 create_btn = gr.Button("Create Experiment", variant="primary")
                 clean_btn = gr.Button("🧹 Clean Form", variant="secondary")
@@ -205,6 +219,8 @@ class CreateExperimentComponent(BaseComponent):
                 preset_btn_6,
                 preset_btn_7,
                 preset_btn_8,
+                enable_memory_checkbox,
+                memory_namespace_input,
             )
 
         return component
@@ -235,11 +251,13 @@ class CreateExperimentComponent(BaseComponent):
             test_size_input,
             split_info,
             max_dataset_size_state,
-            *preset_buttons_debug,
+            *preset_buttons_and_mem,
         ) = inputs
 
-        # Separate preset buttons from debug components
-        preset_buttons = preset_buttons_debug[:-3]
+        enable_memory_checkbox = preset_buttons_and_mem[-2]
+        memory_namespace_input = preset_buttons_and_mem[-1]
+        preset_buttons_debug = preset_buttons_and_mem[:-2]
+        preset_buttons = preset_buttons_debug
 
         # Update target choices when file changes
         def _update_target_choices(file, task_type, preset_active, preset_target, max_size_state):
@@ -529,6 +547,8 @@ class CreateExperimentComponent(BaseComponent):
                 preset_active_state,
                 dataset_size_input,
                 test_size_input,
+                enable_memory_checkbox,
+                memory_namespace_input,
             ],
             outputs=create_output,
         )
@@ -687,6 +707,8 @@ class CreateExperimentComponent(BaseComponent):
         preset_example: Optional[str],
         dataset_size: Optional[float],
         test_size: float,
+        enable_memory: bool = False,
+        memory_namespace: str = "",
     ) -> str:
         """Create a new experiment.
 
@@ -837,11 +859,13 @@ class CreateExperimentComponent(BaseComponent):
                     parameters["n_clusters"] = 3  # type: ignore
 
             # Create experiment config
+            parameters["enable_memory"] = bool(enable_memory)
+            if str(memory_namespace or "").strip():
+                parameters["memory_namespace"] = str(memory_namespace).strip()
             config = {
                 "description": description,
                 "llm_model": llm_model,
                 "max_iterations": max_iterations,
-                "timeout_seconds": 3600,
                 "parameters": parameters,
             }
 
@@ -967,7 +991,7 @@ class CreateExperimentComponent(BaseComponent):
 
         # Update UI based on task type
         if task == "classification":
-            # Для пресета классификации по умолчанию выбираем LogisticRegression
+            # Default model for classification preset
             model_update = gr.update(
                 choices=["LogisticRegression", "LightAutoML", "CatBoost"],
                 value="LogisticRegression",
@@ -993,7 +1017,7 @@ class CreateExperimentComponent(BaseComponent):
                 target,  # preset_target_state
             )
         elif task == "regression":
-            # Для пресета регрессии по умолчанию выбираем Ridge
+            # Default model for regression preset
             model_update = gr.update(
                 choices=["Ridge", "LightAutoML"],
                 value="Ridge",
@@ -1019,7 +1043,7 @@ class CreateExperimentComponent(BaseComponent):
                 target,  # preset_target_state
             )
         elif task == "clustering":
-            # Для кластеризации модель не выбираем
+            # No model selection for clustering
             model_update = gr.update(choices=[], value=None, visible=False)
             return (
                 gr.update(value=desc),  # description_input

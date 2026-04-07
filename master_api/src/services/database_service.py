@@ -6,8 +6,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 from loguru import logger
-from sqlalchemy import text
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ..config import load_config
@@ -31,7 +30,7 @@ class DatabaseService:
             experiments_columns = {
                 "status_message": "TEXT",
             }
-            
+
             for column_name, column_type in experiments_columns.items():
                 # Check if column exists
                 check_query = text(
@@ -74,7 +73,7 @@ class DatabaseService:
             # Create tables
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-                
+
                 # Ensure missing columns are added (for existing databases)
                 if not self.config.database.url.startswith("sqlite"):
                     await self._ensure_columns_exist(conn)

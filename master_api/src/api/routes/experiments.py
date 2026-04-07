@@ -14,11 +14,12 @@ from loguru import logger
 from common.llm_registry import get_allowed_llm_model_ids, is_allowed_llm_model
 
 from ...models.experiment import (
+    CARLChainExperimentCreate,
+    ChainExperimentCreate,
     Experiment,
     ExperimentConfig,
     ExperimentCreate,
     PromptExperimentCreate,
-    ChainExperimentCreate,
 )
 from ...services.experiment_service import ExperimentService
 from ...services.service_manager import ServiceManager
@@ -191,6 +192,8 @@ async def create_prompt_experiment(
                 "target_column": prompt_experiment.target_column,
                 "base_prompt": prompt_experiment.base_prompt,
                 "validation_criteria": vc_dict,
+                "enable_memory": bool(getattr(prompt_experiment, "enable_memory", False)),
+                "memory_namespace": getattr(prompt_experiment, "memory_namespace", None),
             },
             llm_model=prompt_experiment.llm_model,
             prompt_llm_model=getattr(prompt_experiment, "prompt_llm_model", None),
@@ -231,6 +234,8 @@ async def create_prompt_experiment(
                     "max_iterations": prompt_experiment.max_iterations,
                     "dataset_size": prompt_experiment.dataset_size,
                     "test_size": prompt_experiment.test_size,
+                    "enable_memory": bool(getattr(prompt_experiment, "enable_memory", False)),
+                    "memory_namespace": getattr(prompt_experiment, "memory_namespace", None),
                 }
                 await creation.create_prompt_experiment_files(experiment_id, prompt_spec, prompt_experiment.data_path)
         except Exception as e:
@@ -290,20 +295,18 @@ async def create_chain_experiment(
         except Exception:
             vc_dict = {}
 
-        timeout_seconds = getattr(chain_experiment, "timeout_seconds", None)
-        if timeout_seconds is None:
-            timeout_seconds = max(3600, int(chain_experiment.max_iterations * 90 * 1.3))
-        
         config = ExperimentConfig(
             description=chain_experiment.description or "",
             parameters={
                 "target_column": chain_experiment.target_column,
                 "base_chain_config": chain_experiment.base_chain_config,
                 "validation_criteria": vc_dict,
+                "ui_experiment_kind": "reasoning_chain",
+                "enable_memory": bool(getattr(chain_experiment, "enable_memory", False)),
+                "memory_namespace": getattr(chain_experiment, "memory_namespace", None),
             },
             llm_model=chain_experiment.llm_model,
             max_iterations=chain_experiment.max_iterations,
-            timeout_seconds=timeout_seconds,
             dataset_size=chain_experiment.dataset_size,
             test_size=chain_experiment.test_size,
         )
@@ -336,11 +339,12 @@ async def create_chain_experiment(
                     "validation_criteria": vc_dict,
                     "llm_model": chain_experiment.llm_model,
                     "max_iterations": chain_experiment.max_iterations,
-                    "timeout_seconds": timeout_seconds,
                     "dataset_size": chain_experiment.dataset_size,
                     "test_size": chain_experiment.test_size,
                     "evolution_mode": getattr(chain_experiment, "evolution_mode", "full_chain") or "full_chain",
                     "step_number": getattr(chain_experiment, "step_number", None),
+                    "enable_memory": bool(getattr(chain_experiment, "enable_memory", False)),
+                    "memory_namespace": getattr(chain_experiment, "memory_namespace", None),
                 }
                 await creation.create_chain_experiment_files(experiment_id, chain_spec, chain_experiment.data_path)
         except Exception as e:
@@ -356,6 +360,161 @@ async def create_chain_experiment(
     except Exception as e:
         logger.error(f"Error creating chain experiment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create chain experiment: {str(e)}")
+
+
+@router.post("/carl-chains", response_model=Experiment)
+async def create_carl_chain_experiment(
+    carl_experiment: CARLChainExperimentCreate,
+    service: ExperimentService = Depends(get_experiment_service),
+):
+    """Create a new CARL chain experiment.
+
+    Note: Even though CARL is a separate library, we reuse the same chain files builder,
+    because the JSON schema is compatible with mmar_carl ReasoningChain.
+    """
+    try:
+        logger.info(f"Received CARL chain experiment creation request: {carl_experiment.name}")
+
+        # Validate feedback template if provided
+        if carl_experiment.feedback_template:
+            valid_templates = ["detailed", "summary", "errors_only"]
+            if carl_experiment.feedback_template not in valid_templates:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid feedback_template '{carl_experiment.feedback_template}'. "
+                    f"Must be one of: {valid_templates}",
+                )
+
+        if carl_experiment.llm_model and not is_allowed_llm_model(carl_experiment.llm_model):
+            allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported llm_model '{carl_experiment.llm_model}'. Allowed: {allowed}",
+            )
+        if carl_experiment.chain_llm_model and not is_allowed_llm_model(carl_experiment.chain_llm_model):
+            allowed = ", ".join(sorted(get_allowed_llm_model_ids()))
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported chain_llm_model '{carl_experiment.chain_llm_model}'. Allowed: {allowed}",
+            )
+
+        try:
+            chain_config = json.loads(carl_experiment.base_chain_config)
+            if "steps" not in chain_config or not isinstance(chain_config["steps"], list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Chain config must contain a 'steps' array with at least one step",
+                )
+            if len(chain_config["steps"]) == 0:
+                raise HTTPException(status_code=400, detail="Chain config must contain at least one step")
+            if carl_experiment.chain_size_limit is not None:
+                if len(chain_config["steps"]) > int(carl_experiment.chain_size_limit):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Chain has {len(chain_config['steps'])} steps which exceeds the limit {carl_experiment.chain_size_limit}",
+                    )
+            if carl_experiment.frozen_steps:
+                step_numbers = {int(s.get("number", -1)) for s in chain_config["steps"] if isinstance(s, dict)}
+                invalid = [n for n in carl_experiment.frozen_steps if n not in step_numbers]
+                if invalid:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Frozen steps {invalid} do not exist in the provided chain configuration",
+                    )
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON in base_chain_config: {str(e)}")
+
+        vc_dict: Dict[str, Any] = {}
+        try:
+            if getattr(carl_experiment, "validation_criteria", None) is not None:
+                vc = carl_experiment.validation_criteria
+                vc_dict = vc.dict() if hasattr(vc, "dict") else vc.model_dump()
+        except Exception:
+            vc_dict = {}
+
+        carl_params: Dict[str, Any] = {
+            "target_column": carl_experiment.target_column,
+            "base_chain_config": carl_experiment.base_chain_config,
+            "validation_criteria": vc_dict,
+            "ui_experiment_kind": "carl_chain",
+            "enable_feedback": bool(getattr(carl_experiment, "enable_feedback", False)),
+            "feedback_template": getattr(carl_experiment, "feedback_template", "detailed") or "detailed",
+            "enable_memory": bool(getattr(carl_experiment, "enable_memory", False)),
+            "memory_namespace": getattr(carl_experiment, "memory_namespace", None),
+        }
+        # Persist chain_llm_model so it can be forwarded to the runner later
+        if carl_experiment.chain_llm_model:
+            carl_params["chain_llm_model"] = carl_experiment.chain_llm_model
+
+        config = ExperimentConfig(
+            description=carl_experiment.description or "",
+            parameters=carl_params,
+            llm_model=carl_experiment.llm_model,
+            max_iterations=carl_experiment.max_iterations,
+            dataset_size=carl_experiment.dataset_size,
+            test_size=carl_experiment.test_size,
+        )
+        experiment_create = ExperimentCreate(
+            name=carl_experiment.name,
+            config=config,
+            data_path=carl_experiment.data_path or "",
+        )
+
+        global _service_manager
+        if not _service_manager:
+            raise HTTPException(status_code=503, detail="Service manager not initialized")
+        db = _service_manager.get_db_service()
+        from uuid import uuid4
+
+        experiment_id = f"exp_{uuid4()}"
+        await db.create_experiment(experiment_create, experiment_id)
+
+        try:
+            if _service_manager and hasattr(_service_manager, "creation_service"):
+                creation = _service_manager.creation_service
+                if creation is None:
+                    raise Exception("Experiment Creation service is not initialized!")
+                chain_spec: Dict[str, Any] = {
+                    "name": carl_experiment.name,
+                    "description": carl_experiment.description or "",
+                    "data_path": carl_experiment.data_path or "",
+                    "target_column": carl_experiment.target_column,
+                    "base_chain_config": carl_experiment.base_chain_config,
+                    "frozen_steps": getattr(carl_experiment, "frozen_steps", None),
+                    "chain_size_limit": getattr(carl_experiment, "chain_size_limit", None),
+                    "evolution_mode": getattr(carl_experiment, "evolution_mode", "full_chain") or "full_chain",
+                    "step_number": getattr(carl_experiment, "step_number", None),
+                    "llm_model": carl_experiment.llm_model,
+                    "chain_llm_model": getattr(carl_experiment, "chain_llm_model", None),
+                    "max_iterations": carl_experiment.max_iterations,
+                    "dataset_size": carl_experiment.dataset_size,
+                    "test_size": carl_experiment.test_size,
+                    "python_code": getattr(carl_experiment, "python_code", None),
+                    "enable_feedback": getattr(carl_experiment, "enable_feedback", False),
+                    "feedback_template": getattr(carl_experiment, "feedback_template", "detailed"),
+                    "validation_criteria": vc_dict,
+                    "enable_memory": bool(getattr(carl_experiment, "enable_memory", False)),
+                    "memory_namespace": getattr(carl_experiment, "memory_namespace", None),
+                }
+                await creation.create_chain_experiment_files(experiment_id, chain_spec, carl_experiment.data_path or "")
+        except Exception as e:
+            logger.error(f"Failed to prepare CARL chain experiment files for {experiment_id}: {e}", exc_info=True)
+            # Don't set status to failed here - let the creation service handle it
+            # But log the error for debugging
+            import traceback
+
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+        created = await service.get_experiment(experiment_id)
+        if not created:
+            raise HTTPException(status_code=500, detail="Experiment created but not found")
+        return created
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating CARL chain experiment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create CARL chain experiment: {str(e)}")
 
 
 @router.delete("/drop-all", response_model=Dict[str, Any])

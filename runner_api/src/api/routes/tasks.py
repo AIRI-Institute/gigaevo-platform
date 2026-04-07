@@ -11,9 +11,18 @@ from ...services.task_service import TaskService
 router = APIRouter()
 
 
+_task_service: TaskService | None = None
+
+
+def set_task_service(service: TaskService | None) -> None:
+    global _task_service
+    _task_service = service
+
+
 def get_task_service() -> TaskService:
-    # TODO: Implement dependency injection
-    return TaskService()
+    if _task_service is None:
+        raise HTTPException(status_code=500, detail="TaskService not initialized")
+    return _task_service
 
 
 @router.post("/", response_model=Task)

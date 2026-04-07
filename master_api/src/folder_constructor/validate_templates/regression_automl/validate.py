@@ -54,7 +54,7 @@ def validate(
     buf_err = io.StringIO()
     with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
         # Import LightAutoML lazily *inside* the redirection context so that
-        # любые сообщения/варнинги от библиотек не попадают во внешние логи.
+        # library warnings/messages do not leak into external logs.
         from lightautoml.automl.presets.tabular_presets import TabularAutoML
         from lightautoml.tasks import Task
 

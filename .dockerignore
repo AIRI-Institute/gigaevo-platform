@@ -1,0 +1,37 @@
+# Large generated artifacts and local bundles
+.bundle-runtime/
+dist/
+
+# VCS, editor state, and local secrets
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.env
+
+# Python virtualenvs and caches anywhere in the repo
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+.ruff_cache/
+**/.ruff_cache/
+*.pyc
+*.pyo
+*.pyd
+
+# OS meta files
+.DS_Store
+**/.DS_Store
+
+# Runtime-generated data not needed in image builds
+master_api/temp_experiments/
+web_ui/input_data/
+
+# Repo content not referenced by the current Dockerfiles
+docs/
+tests/
+docker/
+docker-compose*.yml

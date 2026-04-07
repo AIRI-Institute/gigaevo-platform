@@ -3,9 +3,10 @@
 import asyncio
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, List, Optional, Set, Tuple, TypedDict
+from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict
 
 import httpx
 import openai
@@ -65,6 +66,27 @@ def create_validator(
 class CallLog:
     prompt_cost_utilization: float
     response_cost_utilization: float
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    model_name: str = ""
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _extract_reasoning_tokens(usage: Any) -> int:
+    details = getattr(usage, "completion_tokens_details", None)
+    if details is None:
+        return 0
+    if isinstance(details, dict):
+        return _safe_int(details.get("reasoning_tokens", 0))
+    return _safe_int(getattr(details, "reasoning_tokens", 0))
 
 
 def _get_async_client() -> openai.AsyncOpenAI:
@@ -149,12 +171,26 @@ class ClientWrapper:
             **self.gen_kwargs,
         )
         content = response.choices[0].message.content or ""
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = _safe_int(getattr(usage, "prompt_tokens", 0)) if usage else 0
+        completion_tokens = _safe_int(getattr(usage, "completion_tokens", 0)) if usage else 0
+        total_tokens = _safe_int(getattr(usage, "total_tokens", 0)) if usage else 0
+        if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+            total_tokens = prompt_tokens + completion_tokens
+        reasoning_tokens = _extract_reasoning_tokens(usage) if usage else 0
+
         M = 1_000_000
-        prompt_cost = (response.usage.prompt_tokens / M) * self.model_pricing["prompt"]
-        response_cost = (response.usage.completion_tokens / M) * self.model_pricing["completion"]
+        prompt_cost = (prompt_tokens / M) * self.model_pricing["prompt"]
+        response_cost = (completion_tokens / M) * self.model_pricing["completion"]
         call_log = CallLog(
             prompt_cost_utilization=prompt_cost / self.max_cost,
             response_cost_utilization=response_cost / self.max_cost,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            reasoning_tokens=reasoning_tokens,
+            total_tokens=total_tokens,
+            model_name=self.model_name,
         )
         self._call_logs.append(call_log)
         return content
@@ -255,9 +291,120 @@ async def _run_agent_async(
     return OutputDict(predictions=predictions, call_logs=all_call_logs)
 
 
+def _sanitize_model_name(model_name: str) -> str:
+    return str(model_name).replace("/", "_").replace(":", "_").strip()
+
+
+def _log_get(call_log: Any, key: str, default: Any = 0) -> Any:
+    try:
+        return getattr(call_log, key)
+    except Exception:
+        pass
+    try:
+        return call_log.get(key, default)
+    except Exception:
+        return default
+
+
+def _aggregate_token_usage(outputs: List[OutputDict], fallback_model_name: str) -> Dict[str, Dict[str, int]]:
+    totals: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: {
+            "context_tokens": 0,
+            "generated_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+
+    for output in outputs:
+        for call_logs in output.get("call_logs", []):
+            for call_log in call_logs:
+                raw_model_name = _log_get(call_log, "model_name", fallback_model_name) or fallback_model_name
+                model_name = _sanitize_model_name(raw_model_name)
+                if not model_name:
+                    continue
+
+                prompt_tokens = _safe_int(_log_get(call_log, "prompt_tokens", 0))
+                completion_tokens = _safe_int(_log_get(call_log, "completion_tokens", 0))
+                reasoning_tokens = _safe_int(_log_get(call_log, "reasoning_tokens", 0))
+                total_tokens = _safe_int(_log_get(call_log, "total_tokens", 0))
+                if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+                    total_tokens = prompt_tokens + completion_tokens
+
+                bucket = totals[model_name]
+                bucket["context_tokens"] += prompt_tokens
+                bucket["generated_tokens"] += completion_tokens
+                bucket["reasoning_tokens"] += reasoning_tokens
+                bucket["total_tokens"] += total_tokens
+
+    return dict(totals)
+
+
+def _publish_token_usage_to_redis(token_totals: Dict[str, Dict[str, int]]) -> None:
+    if not token_totals:
+        return
+
+    redis_host = (os.getenv("GIGAEVO_REDIS_HOST") or "").strip()
+    redis_port_raw = (os.getenv("GIGAEVO_REDIS_PORT") or "").strip()
+    redis_db_raw = (os.getenv("GIGAEVO_REDIS_DB") or "").strip()
+    metrics_prefix = (os.getenv("GIGAEVO_METRICS_PREFIX") or "").strip()
+    if not redis_host or not metrics_prefix:
+        return
+
+    try:
+        redis_port = int(redis_port_raw or "6379")
+        redis_db = int(redis_db_raw or "0")
+    except ValueError:
+        return
+
+    client = None
+    try:
+        import redis  # type: ignore
+
+        client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            db=redis_db,
+            decode_responses=True,
+        )
+        hash_key = f"{metrics_prefix}:metrics:latest"
+        pipe = client.pipeline(transaction=False)
+
+        for model_name, usage in token_totals.items():
+            metric_prefix = f"llm/tokens/default/{model_name}/"
+            context_tokens = float(usage.get("context_tokens", 0))
+            generated_tokens = float(usage.get("generated_tokens", 0))
+            reasoning_tokens = float(usage.get("reasoning_tokens", 0))
+            total_tokens = float(usage.get("total_tokens", 0))
+
+            # Last snapshot fields (for parity with core tracker schema).
+            pipe.hset(hash_key, metric_prefix + "context_tokens", context_tokens)
+            pipe.hset(hash_key, metric_prefix + "generated_tokens", generated_tokens)
+            pipe.hset(hash_key, metric_prefix + "reasoning_tokens", reasoning_tokens)
+            pipe.hset(hash_key, metric_prefix + "total_tokens", total_tokens)
+
+            # Cumulative fields consumed by summary/report code.
+            pipe.hincrbyfloat(hash_key, metric_prefix + "cumulative_context_tokens", context_tokens)
+            pipe.hincrbyfloat(hash_key, metric_prefix + "cumulative_generated_tokens", generated_tokens)
+            pipe.hincrbyfloat(hash_key, metric_prefix + "cumulative_reasoning_tokens", reasoning_tokens)
+            pipe.hincrbyfloat(hash_key, metric_prefix + "cumulative_total_tokens", total_tokens)
+
+        pipe.execute()
+    except Exception:
+        # Token metrics publication should never break experiment execution.
+        return
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def run_agent(prompt_template: str, context: dict):
     # Infer placeholders
     train_dataset = context["train_dataset"]
+    model_name = str(context.get("model_name") or "")
     available_placeholders = get_dataset_columns(train_dataset, exclude_target="${target_field}")
     required_placeholders = {${required_fields_set}}
     validator = create_validator(required_placeholders, available_placeholders)
@@ -265,4 +412,6 @@ def run_agent(prompt_template: str, context: dict):
     agent_cls_partial = partial(PromptAgent, prompt_template=prompt_template)
     train_output = asyncio.run(_run_agent_async(agent_cls_partial, context, "train_dataset"), debug=True)
     val_output = asyncio.run(_run_agent_async(agent_cls_partial, context, "val_dataset"), debug=True)
+    token_totals = _aggregate_token_usage([train_output, val_output], fallback_model_name=model_name)
+    _publish_token_usage_to_redis(token_totals)
     return {"train": train_output, "val": val_output}

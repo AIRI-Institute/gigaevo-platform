@@ -8,8 +8,8 @@ Implement and iteratively improve a JSON configuration of a CARL reasoning chain
 The chain must read the input data and guide the underlying LLM through a sequence of reasoning steps to compute the correct answer.
 
 - Output of the program: A CARL chain configuration stored in CHAIN_CONFIG_JSON, executed by the helper module.
-- Fitness: Accuracy of predicted answers on the evaluation dataset.
-- Goal: Maximize the measured Accuracy.
+- Fitness: ${fitness_description}
+- Goal: ${fitness_goal}
 
 INPUT–OUTPUT CONTEXT:
 - Input: Each data sample has fields from the dataset.
@@ -20,40 +20,7 @@ CONSTRAINTS:
 - You MUST define a single variable `CHAIN_CONFIG_JSON: str` inside the evolve block.
 - `CHAIN_CONFIG_JSON` MUST contain valid JSON describing the CARL chain:
 
-  REQUIRED FIELDS:
-  
-  - "steps" (REQUIRED): List of step objects defining the reasoning chain. Each step object MUST contain:
-    
-    * "number" (REQUIRED, int): Sequential step number starting from 1. Defines the execution order 
-      of steps in the reasoning chain. Steps are executed in ascending order of their numbers.
-    
-    * "title" (REQUIRED, str): Short descriptive name for the step (e.g., "Problem Understanding", 
-      "Solution Computation"). Used for identification and logging purposes.
-    
-    * "aim" (REQUIRED, str): Clear statement of what this step should accomplish. Describes the 
-      goal or objective of the step in the context of solving the problem. Guides the LLM's 
-      reasoning direction.
-    
-    * "reasoning_questions" (REQUIRED, str): Questions that guide the LLM's reasoning process 
-      at this step. Should help break down the problem and focus on relevant aspects. Can be 
-      a single question or multiple questions separated by newlines or semicolons.
-    
-    * "dependencies" (REQUIRED, list): List of step numbers (integers) that must be completed 
-      before this step can execute. Empty list [] means the step has no dependencies and can 
-      run immediately. Used to define the execution graph and ensure proper ordering.
-    
-    * "step_context_queries" (REQUIRED, list): List of strings specifying what context information 
-      should be retrieved for this step. Defines what information 
-      is available to the LLM during step execution.
-    
-    * "stage_action" (REQUIRED, str): Detailed description of the action to be performed at this 
-      step. Provides specific instructions to the LLM about what operations, calculations, or 
-      reasoning processes should be carried out. More detailed than "aim" and guides the 
-      actual execution.
-    
-    * "example_reasoning" (REQUIRED, str): Example or template of how reasoning should proceed 
-      at this step. Serves as a demonstration or pattern for the LLM to follow. Helps establish 
-      the expected reasoning style and format.
+${carl_types_documentation}
   
   OPTIONAL FIELDS (at chain level):
   
@@ -66,6 +33,7 @@ CONSTRAINTS:
 
 - The entrypoint function returns only the chain configuration - execution happens in validate.py.
 
+${available_tools_documentation}
 FAILURE MODES:
 - Invalid JSON (not parseable).
 - Missing required fields for CARL steps.
@@ -73,13 +41,31 @@ FAILURE MODES:
 
 EVALUATION FRAMEWORK:
 - Performance is evaluated by accuracy and auxiliary metrics.
-- Fitness = Accuracy on the train split; val_fitness = Accuracy on the validation split.
+- ${fitness_evaluation_description}
 - Higher fitness → better chain.
+
+${task_specific_considerations}
+FROZEN STEPS:
+- Steps marked with "frozen": true MUST NOT be modified during evolution.
+- These steps are automatically restored from BASE_CHAIN_CONFIG after evolution.
+- Do NOT change step_type, step_config, dependencies, or any fields of frozen steps.
+- Only evolve steps that do NOT have "frozen": true.
+- CRITICAL: Do NOT renumber frozen steps. Their step number is their identity.
+  If you add new steps, use numbers that do NOT collide with frozen step numbers.
+  Frozen steps will be force-restored to their ORIGINAL number, content, and dependencies.
 
 OUTPUT FORMAT:
 
 The entrypoint function is FIXED and must NOT be changed.
 The entrypoint only returns the chain configuration - execution happens in validate.py.
+
+CRITICAL: PYTHON CODE SYNTAX
+- You are writing Python code, NOT JSON.
+- Use regular double quotes (") in Python code, NOT escaped quotes (\") or JSON-style escaping.
+- Example: base_steps_by_num = {s.get("number"): s for s in base.get("steps", [])}  ✅ CORRECT
+- Example: base_steps_by_num = {s.get(\"number\"): s for s in base.get(\"steps\", [])}  ❌ WRONG (causes SyntaxError)
+- The CHAIN_CONFIG_JSON variable contains a JSON string, but the Python code around it uses normal Python syntax.
+- All Python code (including _apply_frozen_steps function if present) must use normal Python quotes, not JSON escaping.
 
 
 CHAIN_CONFIG_JSON: str = """<your JSON chain config here>""".strip()

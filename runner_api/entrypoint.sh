@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Fix permissions for the repos directory at runtime
-# This ensures the volume can be written to by the correct user
+# Fix permissions for writable application paths at runtime.
 echo "Setting up permissions for GigaEvo Platform application..."
 
 # Get host user UID/GID from environment or use defaults
@@ -10,7 +9,7 @@ HOST_GID=${HOST_GID:-1000}
 
 # Always fix permissions as root
 if [ "$(id -u)" = "0" ]; then
-    echo "Running as root, fixing ownership of /app/repos..."
+    echo "Running as root, fixing ownership of runtime paths..."
     echo "Using UID: $HOST_UID, GID: $HOST_GID"
     
     # Create user with host UID/GID if it doesn't exist
@@ -34,21 +33,11 @@ if [ "$(id -u)" = "0" ]; then
         groupmod -g "$HOST_GID" gigaevouser 2>/dev/null || true
     fi
     
-    # IMPORTANT:
-    # - In dev mode, some mounts are read-only (e.g. /app/master_api/src:ro).
-    # - Chowning the entire /app tree causes lots of errors and slows startup, which can break healthchecks.
-    # Only chown directories that must be writable by the runner.
-    # Prefer chowning only the configured clone path (can be large; avoid scanning the whole /app/repos).
-    CLONE_PATH="${GIGAVOLVE__CLONE_PATH:-/app/repos/gigaevo-core}"
-    if [ -n "$CLONE_PATH" ]; then
-        mkdir -p "$(dirname "$CLONE_PATH")" 2>/dev/null || true
-        mkdir -p "$CLONE_PATH" 2>/dev/null || true
-        # Avoid recursive chown on bind mounts (slow on macOS); just ensure dirs are owned.
-        chown "$USER_TO_USE:$USER_TO_USE" "$(dirname "$CLONE_PATH")" 2>/dev/null || true
-        chown "$USER_TO_USE:$USER_TO_USE" "$CLONE_PATH" 2>/dev/null || true
+    # Keep ownership updates constrained to paths the runner writes to.
+    CLONE_PATH="${GIGAVOLVE__CLONE_PATH:-/opt/gigaevo-core}"
+    if [ -d "$CLONE_PATH" ]; then
+        chown -R "$USER_TO_USE:$USER_TO_USE" "$CLONE_PATH" 2>/dev/null || true
     fi
-    chown -R "$USER_TO_USE:$USER_TO_USE" /tmp/gigavolve 2>/dev/null || true
-    chown -R "$USER_TO_USE:$USER_TO_USE" /tmp/problems 2>/dev/null || true
     chown -R "$USER_TO_USE:$USER_TO_USE" /app/src 2>/dev/null || true
 
     # Switch to the user for the main application

@@ -6,14 +6,16 @@ import json
 import os
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from common.version import __version__
-from src.api.routes import examples, experiments, instances, results, status
+from src.api.routes import agent_skills, evolutions, examples, experiments, instances, results, status
 from src.config import load_config
+from src.security import get_configured_api_key, get_cors_allowed_origins, require_api_key
 from src.services.service_manager import ServiceManager
+from src.services.status_service import _empty_runner_pool, _runner_pool_summary
 
 # Initialize global service manager
 service_manager: ServiceManager = None
@@ -25,19 +27,25 @@ app = FastAPI(
     version=__version__,
 )
 
+_cors_allowed = get_cors_allowed_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_allowed,
+    allow_credentials="*" not in _cors_allowed,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(experiments.router, prefix="/api/v1/experiments", tags=["experiments"])
-app.include_router(instances.router, prefix="/api/v1/instances", tags=["instances"])
-app.include_router(status.router, prefix="/api/v1/status", tags=["status"])
-app.include_router(results.router)
-app.include_router(examples.router, tags=["examples"])
+_auth = [Depends(require_api_key)]
+app.include_router(experiments.router, prefix="/api/v1/experiments", tags=["experiments"], dependencies=_auth)
+app.include_router(instances.router, prefix="/api/v1/instances", tags=["instances"], dependencies=_auth)
+app.include_router(status.router, prefix="/api/v1/status", tags=["status"], dependencies=_auth)
+app.include_router(results.router, dependencies=_auth)
+app.include_router(examples.router, tags=["examples"], dependencies=_auth)
+app.include_router(
+    agent_skills.router, prefix="/api/v1/agent-skills", tags=["agent-skills"], dependencies=_auth
+)
+app.include_router(evolutions.router, prefix="/api/v1/evolutions", tags=["evolutions"], dependencies=_auth)
 
 
 @app.get("/debug/consumer")
@@ -96,6 +104,8 @@ async def health_check():
         "status": "healthy",
         "service": "master-api",
         "timestamp": "2024-01-01T00:00:00Z",
+        "auth": "required" if get_configured_api_key() else "open",
+        "runner_pool": _empty_runner_pool(),
         "components": {},
     }
 
@@ -103,6 +113,12 @@ async def health_check():
         service_health = service_manager.health_check()
         health_status["components"] = service_health["services"]
         health_status["service_manager"] = service_health["service_manager"]
+        if service_manager.instance_service:
+            try:
+                runner_instances = await service_manager.instance_service.list_instances()
+                health_status["runner_pool"] = _runner_pool_summary(runner_instances)
+            except Exception as exc:
+                health_status["runner_pool_error"] = str(exc)
     else:
         health_status["status"] = "unhealthy"
         health_status["service_manager"] = "not_initialized"
@@ -140,6 +156,8 @@ async def startup_event():
         status.set_service_manager(service_manager)
         results.set_service_manager(service_manager)
         examples.set_service_manager(service_manager)
+        agent_skills.set_service_manager(service_manager)
+        evolutions.set_service_manager(service_manager)
 
         # Placeholder: real-time visuals are now produced by runner-api.
         # Master will no longer generate placeholder images.

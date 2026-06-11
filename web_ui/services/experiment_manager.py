@@ -6,6 +6,8 @@ import requests
 from config.settings import DEFAULT_TIMEOUTS, MASTER_API_URL
 from loguru import logger
 
+from ._http import make_session
+
 
 class ExperimentManager:
     """Handles all experiment-related operations through the Master API."""
@@ -18,6 +20,7 @@ class ExperimentManager:
         """
         self.base_url = base_url or MASTER_API_URL
         self.timeout = DEFAULT_TIMEOUTS["api_request"]
+        self.http = make_session()
 
     def create_experiment(self, name: str, config: Dict[str, Any], data_path: str) -> Dict[str, Any]:
         """Create a new experiment.
@@ -47,7 +50,7 @@ class ExperimentManager:
             if "n_clusters" in params:
                 payload["n_clusters"] = params["n_clusters"]
 
-            response = requests.post(f"{self.base_url}/api/v1/experiments/ml", json=payload, timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/experiments/ml", json=payload, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -62,7 +65,7 @@ class ExperimentManager:
             List of experiment dictionaries
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/experiments/", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/experiments/", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -80,7 +83,7 @@ class ExperimentManager:
             Experiment dictionary or None if not found
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/experiments/{experiment_id}", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/experiments/{experiment_id}", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -98,7 +101,7 @@ class ExperimentManager:
             Status dictionary or None if not found
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/experiments/{experiment_id}/status", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/experiments/{experiment_id}/status", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -116,7 +119,7 @@ class ExperimentManager:
             Results dictionary or None if not found
         """
         try:
-            response = requests.get(
+            response = self.http.get(
                 f"{self.base_url}/api/v1/experiments/{experiment_id}/results",
                 timeout=DEFAULT_TIMEOUTS["experiment_results"],
             )
@@ -137,7 +140,7 @@ class ExperimentManager:
             Result dictionary
         """
         try:
-            response = requests.post(f"{self.base_url}/api/v1/experiments/{experiment_id}/start", timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/experiments/{experiment_id}/start", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -166,7 +169,7 @@ class ExperimentManager:
             Result dictionary
         """
         try:
-            response = requests.post(f"{self.base_url}/api/v1/experiments/{experiment_id}/stop", timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/experiments/{experiment_id}/stop", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -194,7 +197,7 @@ class ExperimentManager:
             Dictionary containing created experiment details or error
         """
         try:
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/api/v1/experiments/prompts", json=prompt_experiment_data, timeout=self.timeout
             )
             response.raise_for_status()
@@ -214,7 +217,7 @@ class ExperimentManager:
             Dictionary containing created experiment details or error
         """
         try:
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/api/v1/experiments/chains", json=chain_experiment_data, timeout=self.timeout
             )
             response.raise_for_status()
@@ -256,7 +259,7 @@ class ExperimentManager:
                 payload["enable_memory"] = enable_memory
             if memory_namespace is not None and str(memory_namespace).strip():
                 payload["memory_namespace"] = str(memory_namespace).strip()
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/api/v1/experiments/carl-chains", json=payload, timeout=self.timeout
             )
             response.raise_for_status()
@@ -272,7 +275,7 @@ class ExperimentManager:
             Result dictionary with deletion summary
         """
         try:
-            response = requests.delete(f"{self.base_url}/api/v1/experiments/drop-all", timeout=self.timeout)
+            response = self.http.delete(f"{self.base_url}/api/v1/experiments/drop-all", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -294,7 +297,7 @@ class ExperimentManager:
             timeout = DEFAULT_TIMEOUTS["file_upload"]
             with open(file_path, "rb") as f:
                 files = {"file": (filename, f.read())}
-                response = requests.post(f"{self.base_url}/api/v1/experiments/upload", files=files, timeout=timeout)
+                response = self.http.post(f"{self.base_url}/api/v1/experiments/upload", files=files, timeout=timeout)
                 response.raise_for_status()
                 return response.json()
 
@@ -314,7 +317,7 @@ class ExperimentManager:
         """
         try:
             logger.info(f"Fetching examples from {self.base_url}/api/v1/examples/")
-            response = requests.get(f"{self.base_url}/api/v1/examples/", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/examples/", timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -361,11 +364,11 @@ class ExperimentManager:
         """
         try:
             logger.info(f"Testing API connectivity to {self.base_url}")
-            response = requests.get(f"{self.base_url}/health", timeout=5)
+            response = self.http.get(f"{self.base_url}/health", timeout=5)
             response.raise_for_status()
 
             # Test the examples endpoint specifically
-            examples_response = requests.get(f"{self.base_url}/api/v1/examples/", timeout=5)
+            examples_response = self.http.get(f"{self.base_url}/api/v1/examples/", timeout=5)
             examples_response.raise_for_status()
             examples_data = examples_response.json()
 
@@ -420,7 +423,7 @@ class ExperimentManager:
             Example specification dictionary or None if not found
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/examples/{name}", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/examples/{name}", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -438,7 +441,7 @@ class ExperimentManager:
             Upload result dictionary
         """
         try:
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/api/v1/examples/{name}/upload", timeout=DEFAULT_TIMEOUTS["file_upload"]
             )
             response.raise_for_status()
@@ -462,7 +465,7 @@ class ExperimentManager:
 
             ts = int(time.time())
             url = f"{self.base_url}/results/{experiment_id}/summary?ts={ts}"
-            response = requests.get(url, timeout=self.timeout)
+            response = self.http.get(url, timeout=self.timeout)
 
             if response.ok:
                 return response.json()
@@ -516,7 +519,7 @@ class ExperimentManager:
 
             ts = int(time.time())
             url = f"{self.base_url}/results/{experiment_id}/evolution_report.json?ts={ts}"
-            response = requests.get(url, timeout=self.timeout)
+            response = self.http.get(url, timeout=self.timeout)
 
             if response.ok:
                 return response.json()
@@ -540,7 +543,7 @@ class ExperimentManager:
 
             ts = int(time.time())
             url = f"{self.base_url}/results/{experiment_id}/download.zip?ts={ts}"
-            response = requests.get(url, timeout=DEFAULT_TIMEOUTS["file_download"])
+            response = self.http.get(url, timeout=DEFAULT_TIMEOUTS["file_download"])
 
             if response.ok and response.content:
                 return response.content
@@ -564,7 +567,7 @@ class ExperimentManager:
 
             ts = int(time.time())
             url = f"{self.base_url}/results/{experiment_id}/best_chain_config.json?ts={ts}"
-            response = requests.get(url, timeout=self.timeout)
+            response = self.http.get(url, timeout=self.timeout)
 
             if response.ok:
                 return response.json()
@@ -588,7 +591,7 @@ class ExperimentManager:
 
             ts = int(time.time())
             url = f"{self.base_url}/results/{experiment_id}/initial_chain_config.json?ts={ts}"
-            response = requests.get(url, timeout=self.timeout)
+            response = self.http.get(url, timeout=self.timeout)
 
             if response.ok:
                 return response.json()
@@ -603,7 +606,7 @@ class ExperimentManager:
     def list_prompt_examples(self) -> List[Dict[str, str]]:
         """List available prompt evolution examples."""
         try:
-            response = requests.get(f"{self.base_url}/api/v1/prompt-examples/", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/prompt-examples/", timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
             return data.get("examples", [])
@@ -614,7 +617,7 @@ class ExperimentManager:
     def get_prompt_example_details(self, name: str) -> Optional[Dict[str, Any]]:
         """Get details for a prompt example."""
         try:
-            response = requests.get(f"{self.base_url}/api/v1/prompt-examples/{name}", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/prompt-examples/{name}", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:
@@ -624,7 +627,7 @@ class ExperimentManager:
     def create_prompt_experiment_from_example(self, name: str) -> Dict[str, Any]:
         """Create a new prompt experiment from a prompt example preset."""
         try:
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/api/v1/prompt-examples/{name}/create", timeout=DEFAULT_TIMEOUTS["api_request"]
             )
             response.raise_for_status()
@@ -637,7 +640,7 @@ class ExperimentManager:
     def upload_local_prompt_preset_dataset(self, name: str) -> Dict[str, Any]:
         """Upload train.csv of local prompt preset to storage."""
         try:
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/api/v1/prompt-presets/local/{name}/upload", timeout=DEFAULT_TIMEOUTS["file_upload"]
             )
             response.raise_for_status()
@@ -650,7 +653,7 @@ class ExperimentManager:
     def list_local_prompt_presets(self) -> List[Dict[str, str]]:
         """List local prompt presets discovered by Master API."""
         try:
-            response = requests.get(f"{self.base_url}/api/v1/prompt-presets/local/", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/prompt-presets/local/", timeout=self.timeout)
             response.raise_for_status()
             return response.json().get("examples", [])
         except requests.RequestException as e:
@@ -660,7 +663,7 @@ class ExperimentManager:
     def get_local_prompt_preset(self, name: str) -> Optional[Dict[str, Any]]:
         """Get local prompt preset details with baseline_prompt."""
         try:
-            response = requests.get(f"{self.base_url}/api/v1/prompt-presets/local/{name}", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/prompt-presets/local/{name}", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:
@@ -693,7 +696,7 @@ class ExperimentManager:
             if feedback_template:
                 url += f"&feedback_template={feedback_template}"
 
-            response = requests.get(url, timeout=self.timeout)
+            response = self.http.get(url, timeout=self.timeout)
 
             if response.ok:
                 data = response.json()
@@ -718,7 +721,7 @@ class ExperimentManager:
         """
         try:
             timeout = max(int(DEFAULT_TIMEOUTS.get("experiment_results", 120)), 660)
-            response = requests.post(
+            response = self.http.post(
                 f"{self.base_url}/results/{experiment_id}/upload_to_memory",
                 timeout=timeout,
             )
@@ -755,7 +758,7 @@ class ExperimentManager:
             if iteration is not None:
                 url += f"&iteration={iteration}"
 
-            response = requests.get(url, timeout=self.timeout)
+            response = self.http.get(url, timeout=self.timeout)
 
             if response.ok:
                 return response.json()

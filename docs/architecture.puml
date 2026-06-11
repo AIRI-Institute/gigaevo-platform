@@ -1,0 +1,94 @@
+@startuml
+title GigaEvo Platform System Architecture — VMs, Containers & Remote LLM with GigaEvolve Workers
+
+!theme plain
+
+' ========== STYLES ==========
+skinparam node {
+    BackgroundColor #f9f9f9
+    BorderColor #999
+    FontColor #111
+}
+skinparam artifact {
+    BackgroundColor #ffffff
+    BorderColor #666
+}
+skinparam cloud {
+    BackgroundColor #d0ebff
+    BorderColor #0077b6
+}
+skinparam database {
+    BackgroundColor #e9ecef
+    BorderColor #495057
+}
+skinparam rectangle {
+    BorderColor #222
+    RoundCorner 10
+}
+skinparam frame {
+    BorderColor #666
+}
+skinparam package {
+    BackgroundColor #fafafa
+    BorderColor #999
+}
+skinparam defaultFontName Monospace
+skinparam defaultTextAlignment center
+
+' ========== USERS ==========
+actor User as user
+
+rectangle "WebUI VM" as vm_web {
+    node "Docker Container: WebUI (Frontend)" as c_web
+}
+
+' ========== CLOUD ==========
+cloud "GigaEvo Platform Cloud Infrastructure" as gigaevo_cloud {
+    
+    frame "VM: Master API Host" as vm_master {
+        node "Docker Container: GigaEvo Platform Master API" as c_master
+    }
+
+    frame "VM: Runner Host" as vm_runner {
+        node "Docker Container: GigaEvo Platform Runner API (Orchestrator)" as c_runner
+        node "Docker Container: Redis (Task Queue)" as c_redis
+        node "Docker Container: GigaEvolve Worker #1 (Python)" as c_worker1
+        node "Docker Container: GigaEvolve Worker #2 (Python)" as c_worker2
+        node "Docker Container: GigaEvolve Worker #3 (Python)" as c_worker3
+    }
+
+    frame "VM: Database Host" as vm_db {
+        database "Docker Container: Config DB (PostgreSQL)" as c_db
+    }
+
+    frame "VM: Storage Host" as vm_storage {
+        artifact "Docker Container: Object Storage (S3-compatible)" as c_storage
+    }
+}
+
+' ========== REMOTE LLM ==========
+cloud "External LLM Provider" as llm_cloud {
+    node "Remote Host: LLM Service API" as c_llm
+}
+
+' ========== CONNECTIONS ==========
+user --> c_web : Upload data/config\nStart & monitor experiments
+c_web --> c_master : REST API calls\n(send data, config, status)
+c_master --> c_db : Store configs
+c_master --> c_storage : Store input data / results
+c_master --> c_runner : Initialize & manage experiments
+
+c_runner --> c_redis : Queue experiment tasks
+c_redis --> c_worker1 : Dispatch tasks
+c_redis --> c_worker2 : Dispatch tasks
+c_redis --> c_worker3 : Dispatch tasks
+c_worker1 --> c_storage : Write experiment results
+c_worker2 --> c_storage : Write experiment results
+c_worker3 --> c_storage : Write experiment results
+
+c_runner --> c_llm : Request code & prompts (generation)
+c_llm --> c_runner : Return generated assets
+
+c_master --> c_web : Return status, metrics, results
+
+@enduml

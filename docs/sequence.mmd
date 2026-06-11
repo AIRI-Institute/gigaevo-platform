@@ -1,0 +1,61 @@
+%%{init: {
+    'theme': 'default',
+    'themeVariables': {
+        'fontSize': '14px',
+            'ganttBarHeight': 25,
+            'ganttBarCornerRadius': 4
+        }
+  }
+}%%
+
+sequenceDiagram
+  participant User as Пользователь (WebUI)
+  participant UI as WebUI
+  participant Master as GAME Master API
+  participant Storage as Хранилище
+  participant DB as БД
+  participant Runner as GAME Runner API
+  participant LLM as LLM
+
+  User->>UI: A1: Загружает данные<br>(+ опц. описание)
+  UI->>Master: Б1: Отправляет данные
+  Master->>Storage: Сохраняет данные
+
+  User->>UI: A2: Заполняет конфиг<br>(+ опц. описание задачи)
+  UI->>Master: Б2: Отправляет конфиг
+  Master->>DB: Сохраняет конфиг
+
+  UI->>Master: В1: Запрос - проверить инстансы
+  Master->>Master: Проверяет развернутые инстансы
+  alt инстанс отсутствует
+    Master->>Runner: В2.1: Инициализировать<br>создание инстанса
+    Runner-->>Master: Подтверждение создания
+  end
+
+  Master->>Runner: В2.2: Инициализация создания<br>эксперимента (данные + конфиг)
+  Runner->>LLM: Г1.1/Г1.2: Анализ данных + шаблоны →<br>генерировать код и промпты
+  LLM-->>Runner: Код и промпты
+  Runner->>Storage: Сохранить файлы эксперимента
+  Runner-->>Master: Файлы созданы / эксперимент готов
+
+  User->>UI: Д1: Запрашивает текущий статус
+  UI->>Master: Запрос статуса
+  Master-->>UI: Текущий статус
+  UI-->>User: Отображение статуса
+
+  User->>UI: Д2: Запускает эксперимент
+  UI->>Master: Команда старта
+  Master->>Runner: Запустить эксперимент
+  Runner-->>Master: Эксперимент запущен
+
+  loop Пока идёт эксперимент
+    Runner->>Master: Отправка метрик / прогресс
+    Master->>UI: Обновление статуса и метрик
+    UI-->>User: Д3: Отображение метрик
+  end
+
+  User->>UI: Д4: Запросить лучший результат<br>и скачать
+  UI->>Master: Запрос лучшего результата
+  Master->>Storage: Получить артефакты
+  Storage-->>UI: Ссылка/файл
+  UI-->>User: Скачивание

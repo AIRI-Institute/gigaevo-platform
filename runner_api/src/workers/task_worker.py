@@ -12,9 +12,11 @@ from redis.asyncio import Redis
 from ..config import load_config
 from ..models.task import Task, TaskStatus, TaskType
 from ..models.worker import WorkerStatus
+from ..sandbox import SandboxError
 from ..services.experiment_service import ExperimentService
 from ..services.gigavolve_service import GigaEvolveService
 from ..services.redis_client import get_redis
+from ..services.skill_executor import SkillExecutionRequest, SkillExecutor
 from ..services.task_repository import TaskRepository
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ class TaskWorker:
         gigavolve_service: GigaEvolveService,
         task_repository: TaskRepository,
         experiment_service: Optional[ExperimentService] = None,
+        skill_executor: Optional[SkillExecutor] = None,
     ):
         self.worker_id = worker_id
         self.name = name
@@ -37,6 +40,9 @@ class TaskWorker:
         self.task_repository = task_repository
         self.experiment_service = experiment_service
         self.config = load_config()
+        # Skill executor — created lazily from config when not injected so
+        # existing call sites (and tests) don't have to know about it.
+        self.skill_executor: SkillExecutor = skill_executor or SkillExecutor(self.config.sandbox)
         self._running = False
 
     async def start(self):
@@ -118,6 +124,8 @@ class TaskWorker:
                 await self._handle_run_experiment(task)
             elif task.task_type == TaskType.COLLECT_RESULTS:
                 await self._handle_collect_results(task)
+            elif task.task_type == TaskType.RUN_AGENT_SKILL:
+                await self._handle_run_agent_skill(task)
             else:
                 raise ValueError(f"Unknown task type: {task.task_type}")
 
@@ -421,6 +429,42 @@ class TaskWorker:
         # The periodic analysis loop in main.py handles plot generation and uploads.
         task.status = TaskStatus.COMPLETED
         task.result = {"info": "Results collection handled by analysis loop"}
+
+    async def _handle_run_agent_skill(self, task: Task):
+        """Dispatch a sandboxed SKILL.md execution (CARE §4.5b).
+
+        Maps :class:`SkillExecutor` outcomes onto task status:
+
+        * sandbox config / payload errors → ``FAILED`` with the message;
+        * non-zero exit code → ``FAILED`` (full RunResult kept in ``result``);
+        * timeout → ``TERMINATED`` (RunResult.timed_out=True);
+        * exit 0 within deadline → ``COMPLETED``.
+        """
+        try:
+            req = SkillExecutionRequest.from_task_parameters(task.parameters or {})
+        except (ValueError, SandboxError) as exc:
+            task.status = TaskStatus.FAILED
+            task.error_message = f"Invalid RUN_AGENT_SKILL payload: {exc}"
+            return
+
+        try:
+            result = await self.skill_executor.execute(req)
+        except SandboxError as exc:
+            task.status = TaskStatus.FAILED
+            task.error_message = f"Sandbox refused to run: {exc}"
+            return
+
+        task.result = result
+        if result.get("timed_out"):
+            task.status = TaskStatus.TERMINATED
+            task.error_message = task.error_message or "Skill execution timed out"
+        elif result.get("succeeded"):
+            task.status = TaskStatus.COMPLETED
+        else:
+            task.status = TaskStatus.FAILED
+            task.error_message = task.error_message or (
+                f"Skill exited with code {result.get('exit_code')}"
+            )
 
     async def _should_continue_running(self) -> bool:
         """Check for a stop signal from Redis."""

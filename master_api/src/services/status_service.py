@@ -10,6 +10,7 @@ from common.version import __version__
 
 from ..models.experiment import ExperimentStatus
 from ..models.instance import RunnerInstanceStatus
+from ..security import get_configured_api_key
 
 
 class StatusService:
@@ -78,9 +79,11 @@ class StatusService:
                 components["kafka"] = "not_configured"
 
             # Runner instances health
+            runner_pool = _empty_runner_pool()
             if self.service_manager and self.service_manager.instance_service:
                 try:
                     instances = await self.service_manager.instance_service.list_instances()
+                    runner_pool = _runner_pool_summary(instances)
                     total_instances = len(instances)
                     healthy_instances = sum(
                         1
@@ -130,6 +133,8 @@ class StatusService:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "version": __version__,
                 "uptime_seconds": int((datetime.now(timezone.utc) - self.start_time).total_seconds()),
+                "auth": "required" if get_configured_api_key() else "open",
+                "runner_pool": runner_pool,
                 "components": components,
             }
 
@@ -140,6 +145,8 @@ class StatusService:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "version": __version__,
                 "error": str(e),
+                "auth": "required" if get_configured_api_key() else "open",
+                "runner_pool": _empty_runner_pool(),
                 "components": {},
             }
 
@@ -333,3 +340,32 @@ class StatusService:
                 "active_experiments": 0,
                 "queued_experiments": 0,
             }
+
+
+def _empty_runner_pool() -> Dict[str, int]:
+    return {
+        "total": 0,
+        "ready_count": 0,
+        "busy_count": 0,
+        "initializing_count": 0,
+        "error_count": 0,
+        "offline_count": 0,
+    }
+
+
+def _runner_pool_summary(instances) -> Dict[str, int]:
+    summary = _empty_runner_pool()
+    summary["total"] = len(instances)
+    for instance in instances:
+        status = getattr(instance, "status", None)
+        if status == RunnerInstanceStatus.READY:
+            summary["ready_count"] += 1
+        elif status == RunnerInstanceStatus.BUSY:
+            summary["busy_count"] += 1
+        elif status in [RunnerInstanceStatus.INITIALIZING, RunnerInstanceStatus.ONLINE]:
+            summary["initializing_count"] += 1
+        elif status == RunnerInstanceStatus.ERROR:
+            summary["error_count"] += 1
+        elif status == RunnerInstanceStatus.OFFLINE:
+            summary["offline_count"] += 1
+    return summary

@@ -6,6 +6,8 @@ import requests
 from config.settings import DEFAULT_TIMEOUTS, MASTER_API_URL, STATUS_COLORS
 from loguru import logger
 
+from ._http import make_session
+
 
 class StatusService:
     """Handles system status and health operations."""
@@ -18,6 +20,7 @@ class StatusService:
         """
         self.base_url = base_url or MASTER_API_URL
         self.timeout = DEFAULT_TIMEOUTS["api_request"]
+        self.http = make_session()
 
     def get_system_status(self) -> Dict[str, Any]:
         """Get comprehensive system status.
@@ -26,7 +29,7 @@ class StatusService:
             System status dictionary
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/status/health", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/status/health", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -41,7 +44,7 @@ class StatusService:
             Bucket name or None if not available
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/status/storage", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/status/storage", timeout=self.timeout)
             if response.ok:
                 data = response.json()
                 return data.get("bucket_name")

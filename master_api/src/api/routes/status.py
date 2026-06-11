@@ -33,6 +33,12 @@ async def health_check(service: StatusService = Depends(get_status_service)):
     return await service.get_system_health()
 
 
+@router.get("", response_model=Dict[str, Any])
+async def status_root(service: StatusService = Depends(get_status_service)):
+    """Compatibility alias for clients that probe ``/api/v1/status``."""
+    return await service.get_system_health()
+
+
 @router.get("/experiments", response_model=Dict[str, Any])
 async def get_experiments_status(service: StatusService = Depends(get_status_service)):
     """Get overall experiments status"""

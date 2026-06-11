@@ -125,6 +125,15 @@ class Config(BaseSettings):
 
     # Redis (for task queue coordination)
     redis_url: str = "redis://localhost:6379/0"
+    # Redis the runner pool publishes live evolution metrics into.
+    # Master API tails these per-experiment lists when serving
+    # ``/experiments`` / ``/experiments/{id}`` so the dashboard
+    # sees current generation + best fitness while the runner is
+    # still mid-run (Platform's DB ``metrics`` field only gets
+    # written at completion). DB index ``1`` matches what
+    # ``gigavolve_service.run_experiment`` passes on the runner
+    # CLI as ``redis.db=1``.
+    gigavolve_redis_url: str = "redis://redis-gigavolve:6379/1"
     timezone: ZoneInfo = ZoneInfo("Europe/Moscow")
     memory_api_url: Optional[str] = None
 

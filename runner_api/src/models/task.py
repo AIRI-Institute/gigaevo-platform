@@ -22,6 +22,11 @@ class TaskType(str, Enum):
     GENERATE_CODE = "generate_code"
     RUN_EXPERIMENT = "run_experiment"
     COLLECT_RESULTS = "collect_results"
+    # Sandboxed execution of an Anthropic-style SKILL.md (CARE §4.5b).
+    # The task ``parameters`` payload carries skill_sha256, skill_name,
+    # skill_md (base64-encoded SKILL.md bytes), command, env, cpu_limit,
+    # memory_limit_mb, pids_limit, timeout_seconds, network, allowed_domains.
+    RUN_AGENT_SKILL = "run_agent_skill"
 
 
 class Task(BaseModel):

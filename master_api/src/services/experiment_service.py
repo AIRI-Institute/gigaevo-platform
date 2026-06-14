@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import httpx
+import redis.asyncio as redis_async
 from loguru import logger
 from src.config import Config
 
@@ -50,6 +52,10 @@ class ExperimentService:
         # Track consecutive 404s per (runner_id, experiment_id) to avoid premature releases
         # when RunnerAPI hasn't yet created its status record right after /start.
         self._missing_status_404_counts: Dict[tuple[str, str], int] = {}
+        # Lazy gigavolve-redis connection; opened on first
+        # ``_read_live_evolution_metrics`` call so unit tests
+        # that don't touch live data don't need the broker up.
+        self._gigavolve_redis: Optional[redis_async.Redis] = None
 
     async def initialize(self):
         """Initialize the experiment service"""
@@ -87,6 +93,250 @@ class ExperimentService:
                 await self._queue_scheduler_task
             except asyncio.CancelledError:
                 pass
+        if self._gigavolve_redis is not None:
+            try:
+                await self._gigavolve_redis.aclose()
+            except Exception:
+                pass
+            self._gigavolve_redis = None
+
+    async def _get_gigavolve_redis(self) -> Optional[redis_async.Redis]:
+        """Lazy-init gigavolve Redis client."""
+        if self._gigavolve_redis is not None:
+            return self._gigavolve_redis
+        url = getattr(self.config, "gigavolve_redis_url", None)
+        if not url:
+            return None
+        try:
+            self._gigavolve_redis = redis_async.from_url(url, decode_responses=True)
+            return self._gigavolve_redis
+        except Exception as exc:
+            logger.warning(f"Failed to open gigavolve redis at {url}: {exc}")
+            return None
+
+    async def _read_live_evolution_metrics(
+        self, experiment_id: str
+    ) -> Dict[str, Any]:
+        """Tail the runner's per-experiment metrics from
+        ``redis-gigavolve`` and return a small dict the
+        ``Experiment`` model can absorb.
+
+        Runner stores each metric as a Redis LIST under
+        ``<problem-uuid>:metrics:history:program_metrics:<name>``
+        with entries shaped ``{"s": <seq>, "t": <ts>, "v": <val>,
+        "k": "scalar"}``. ``<problem-uuid>`` is the experiment id
+        without the ``exp_`` prefix (matches the
+        ``problem.name=`` arg the runner CLI receives).
+
+        Returns ``{}`` when no data is available yet.
+        """
+        if not experiment_id:
+            return {}
+        client = await self._get_gigavolve_redis()
+        if client is None:
+            return {}
+        problem_uuid = experiment_id[4:] if experiment_id.startswith("exp_") else experiment_id
+        prefix = f"{problem_uuid}:metrics:history:program_metrics:"
+        keys = (
+            prefix + "valid_frontier_fitness",
+            prefix + "valid_iter_val_fitness_mean",
+            prefix + "valid_program_fitness",
+            prefix + "programs_valid_count",
+            prefix + "programs_invalid_count",
+        )
+        try:
+            tails = await asyncio.gather(
+                *(client.lrange(k, -1, -1) for k in keys),
+                return_exceptions=True,
+            )
+        except Exception as exc:
+            logger.debug(f"gigavolve metrics tail failed for {experiment_id}: {exc}")
+            return {}
+
+        # Pull a bounded fitness *history* (best + mean per
+        # iteration) so dashboards/screens can render a real
+        # line plot. Cap at the most recent 200 points to keep
+        # the JSON payload small; line plots over more than a
+        # few hundred ticks all look the same anyway.
+        history_keys = (
+            prefix + "valid_frontier_fitness",
+            prefix + "valid_iter_val_fitness_mean",
+        )
+        history_tails: List[Any] = []
+        try:
+            history_tails = list(
+                await asyncio.gather(
+                    *(client.lrange(k, -200, -1) for k in history_keys),
+                    return_exceptions=True,
+                )
+            )
+        except Exception:
+            history_tails = []
+
+        out: Dict[str, Any] = {}
+        for key, tail in zip(keys, tails):
+            if isinstance(tail, Exception) or not tail:
+                continue
+            try:
+                entry = json.loads(tail[0])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            seq = entry.get("s")
+            value = entry.get("v")
+            if key.endswith("valid_frontier_fitness"):
+                if isinstance(value, (int, float)):
+                    out["best_fitness"] = float(value)
+                if isinstance(seq, int):
+                    out["generation"] = max(int(out.get("generation", 0)), seq)
+            elif key.endswith("valid_iter_val_fitness_mean"):
+                if isinstance(seq, int):
+                    out["generation"] = max(int(out.get("generation", 0)), seq)
+                if isinstance(value, (int, float)):
+                    out["current_fitness"] = float(value)
+            elif key.endswith("valid_program_fitness"):
+                if "best_fitness" not in out and isinstance(value, (int, float)):
+                    out["best_fitness"] = float(value)
+            elif key.endswith("programs_valid_count"):
+                if isinstance(value, (int, float)) and value >= 0:
+                    out["programs_valid"] = int(value)
+            elif key.endswith("programs_invalid_count"):
+                if isinstance(value, (int, float)) and value >= 0:
+                    out["programs_invalid"] = int(value)
+
+        # Assemble the fitness history series. Each entry is
+        # ``{"generation": int, "best_fitness": float|None,
+        # "current_fitness": float|None}``. Generation numbers
+        # are sourced from the Redis list ``s`` field, which the
+        # runner increments per iteration.
+        history_by_gen: Dict[int, Dict[str, Any]] = {}
+
+        def _absorb(entries: Any, field_name: str) -> None:
+            if isinstance(entries, Exception) or not entries:
+                return
+            for raw in entries:
+                try:
+                    e = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                seq = e.get("s")
+                value = e.get("v")
+                if not isinstance(seq, int):
+                    continue
+                slot = history_by_gen.setdefault(
+                    seq, {"generation": seq}
+                )
+                if isinstance(value, (int, float)):
+                    slot[field_name] = float(value)
+
+        if history_tails:
+            _absorb(history_tails[0], "best_fitness")
+            _absorb(history_tails[1], "current_fitness")
+
+        history = [
+            history_by_gen[k] for k in sorted(history_by_gen.keys())
+        ]
+        if history:
+            out["fitness_history"] = history
+
+        # Frontier programs — one record per generation that
+        # produced a fitness improvement, projecting the
+        # embedded chain config + mutation rationale so CARE's
+        # Versions tab can render real chain content instead of
+        # the "not exposed by Platform" placeholder.
+        try:
+            frontier = await self._read_frontier_programs(
+                client, problem_uuid
+            )
+        except Exception as exc:
+            logger.debug(
+                f"frontier scan failed for {experiment_id}: {exc}",
+            )
+            frontier = []
+        if frontier:
+            out["frontier_programs"] = frontier
+        return out
+
+    async def _read_frontier_programs(
+        self, client: Any, problem_uuid: str
+    ) -> List[Dict[str, Any]]:
+        """Scan ``<uuid>:program:*`` and return one record per
+        generation that produced the highest fitness so far."""
+        keys: List[str] = []
+        try:
+            async for key in client.scan_iter(
+                match=f"{problem_uuid}:program:*",
+                count=200,
+            ):
+                keys.append(key)
+                if len(keys) >= 500:
+                    break
+        except Exception:
+            keys = []
+        if not keys:
+            return []
+        try:
+            raws = await client.mget(*keys)
+        except Exception:
+            return []
+        import re
+
+        chain_pat = re.compile(
+            r'BASE_CHAIN_CONFIG\s*:\s*str\s*=\s*"""(.*?)"""',
+            re.DOTALL,
+        )
+
+        best_by_gen: Dict[int, Dict[str, Any]] = {}
+        for raw in raws:
+            if not raw:
+                continue
+            try:
+                p = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            metrics = p.get("metrics") or {}
+            fitness = metrics.get("fitness")
+            if not isinstance(fitness, (int, float)):
+                continue
+            if fitness <= -100:
+                continue
+            lineage = p.get("lineage") or {}
+            gen = lineage.get("generation")
+            if not isinstance(gen, int):
+                gen = p.get("iteration")
+            if not isinstance(gen, int):
+                continue
+            existing = best_by_gen.get(gen)
+            if existing is not None and existing["fitness"] >= float(fitness):
+                continue
+            chain_config: Optional[Dict[str, Any]] = None
+            code = p.get("code") or ""
+            if isinstance(code, str):
+                m = chain_pat.search(code)
+                if m:
+                    try:
+                        chain_config = json.loads(m.group(1).strip())
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        chain_config = None
+            mutation_meta = (p.get("metadata") or {}).get("mutation_output") or {}
+            best_by_gen[gen] = {
+                "generation": gen,
+                "program_id": p.get("id"),
+                "fitness": float(fitness),
+                "chain_config": chain_config,
+                "mutation_summary": mutation_meta.get("justification") or "",
+                "mutation_changes": mutation_meta.get("changes") or [],
+            }
+
+        if not best_by_gen:
+            return []
+        ordered = [best_by_gen[g] for g in sorted(best_by_gen.keys())]
+        frontier: List[Dict[str, Any]] = []
+        last_best = float("-inf")
+        for row in ordered:
+            if row["fitness"] > last_best:
+                frontier.append(row)
+                last_best = row["fitness"]
+        return frontier
         # NOTE: Do not cleanup shared dependencies here; ServiceManager owns their lifecycle.
 
     async def create_experiment(self, experiment_create: ExperimentCreate) -> Experiment:
@@ -158,10 +408,39 @@ class ExperimentService:
             for model in experiment_models:
                 await self._sync_status_from_redis(model, update_in_place=True)
 
+            await self._merge_live_metrics_for_models(experiment_models)
+
             return [self._model_to_api(model) for model in experiment_models]
         except Exception as e:
             logger.error(f"Failed to list experiments: {e}")
             raise
+
+    async def _merge_live_metrics_for_models(
+        self, models: List[ExperimentModel]
+    ) -> None:
+        """Tail gigavolve Redis for every model that may still
+        have live data and merge values into ``model.metrics``
+        in place."""
+        active = {"running", "preparing", "initializing", "dispatching",
+                  "queued", "completed", "failed"}
+        targets = [m for m in models if str(getattr(m, "status", "") or "").lower() in active]
+        if not targets:
+            return
+        sem = asyncio.Semaphore(8)
+
+        async def _fill(m: ExperimentModel) -> None:
+            async with sem:
+                try:
+                    live = await self._read_live_evolution_metrics(str(getattr(m, "id")))
+                except Exception:
+                    return
+                if not live:
+                    return
+                base = dict(m.metrics or {})
+                base.update(live)
+                m.metrics = base
+
+        await asyncio.gather(*[asyncio.create_task(_fill(m)) for m in targets])
 
     async def get_experiment(self, experiment_id: str) -> Optional[Experiment]:
         """Get experiment by ID"""
@@ -174,7 +453,10 @@ class ExperimentService:
             if await self._sync_status_from_redis(experiment_model):
                 # Refresh model from database after sync
                 experiment_model = await self.db_service.get_experiment(experiment_id)
+                if not experiment_model:
+                    return None
 
+            await self._merge_live_metrics_for_models([experiment_model])
             return self._model_to_api(experiment_model)
 
         except Exception as e:
@@ -334,10 +616,25 @@ class ExperimentService:
             if await self.storage_service.object_exists(initial_chain_config_object):
                 artifacts["initial_chain_config_s3"] = initial_chain_config_object
 
+            # Merge live runner metrics (current generation +
+            # best fitness, pulled from gigavolve Redis) into the
+            # response so the dashboard/EvolutionScreen sees real
+            # progress mid-run. Falls back to the DB ``metrics``
+            # dict (always empty for chain experiments until
+            # completion) when the live read returns nothing.
+            metrics: Dict[str, Any] = dict(experiment_model.metrics or {})
+            try:
+                live = await self._read_live_evolution_metrics(experiment_id)
+            except Exception:
+                live = {}
+            metrics.update(live)
+
             payload: Dict[str, Any] = {
                 "experiment_id": experiment_id,
                 "status": experiment_model.status,
-                "metrics": experiment_model.metrics or {},
+                "metrics": metrics,
+                "generation": metrics.get("generation"),
+                "best_fitness": metrics.get("best_fitness"),
                 "completed_at": experiment_model.completed_at.isoformat() if experiment_model.completed_at else None,
                 "runner_id": experiment_model.config.get("assigned_runner_id"),
                 "artifacts": artifacts,

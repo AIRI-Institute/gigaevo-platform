@@ -6,6 +6,8 @@ import requests
 from config.settings import DEFAULT_TIMEOUTS, MASTER_API_URL
 from loguru import logger
 
+from ._http import make_session
+
 
 class InstanceManager:
     """Handles all runner instance operations through the Master API."""
@@ -18,6 +20,7 @@ class InstanceManager:
         """
         self.base_url = base_url or MASTER_API_URL
         self.timeout = DEFAULT_TIMEOUTS["api_request"]
+        self.http = make_session()
 
     def list_instances(self) -> List[Dict[str, Any]]:
         """List all runner instances.
@@ -26,7 +29,7 @@ class InstanceManager:
             List of instance dictionaries
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/instances/", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/instances/", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -44,7 +47,7 @@ class InstanceManager:
             Instance dictionary or None if not found
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/instances/{instance_id}", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/instances/{instance_id}", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -62,7 +65,7 @@ class InstanceManager:
             Result dictionary
         """
         try:
-            response = requests.post(f"{self.base_url}/api/v1/instances/{instance_id}/initialize", timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/instances/{instance_id}/initialize", timeout=self.timeout)
             if response.status_code >= 400:
                 logger.error(
                     f"Failed to initialize instance {instance_id}: {response.status_code} {response.text.strip()}"
@@ -81,7 +84,7 @@ class InstanceManager:
             Result dictionary with summary
         """
         try:
-            response = requests.post(f"{self.base_url}/api/v1/instances/initialize-all", timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/instances/initialize-all", timeout=self.timeout)
             if response.status_code >= 400:
                 logger.error(f"Failed to initialize all instances: {response.status_code} {response.text.strip()}")
                 return {"error": f"{response.status_code}: {response.text.strip()}"}
@@ -101,7 +104,7 @@ class InstanceManager:
             Result dictionary
         """
         try:
-            response = requests.post(f"{self.base_url}/api/v1/instances/{instance_id}/stop", timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/instances/{instance_id}/stop", timeout=self.timeout)
             if response.status_code >= 400:
                 logger.error(f"Failed to stop instance {instance_id}: {response.status_code} {response.text.strip()}")
                 return {"error": f"{response.status_code}: {response.text.strip()}"}
@@ -121,7 +124,7 @@ class InstanceManager:
             Result dictionary
         """
         try:
-            response = requests.post(f"{self.base_url}/api/v1/instances/{instance_id}/restart", timeout=self.timeout)
+            response = self.http.post(f"{self.base_url}/api/v1/instances/{instance_id}/restart", timeout=self.timeout)
             if response.status_code >= 400:
                 logger.error(
                     f"Failed to restart instance {instance_id}: {response.status_code} {response.text.strip()}"
@@ -144,7 +147,7 @@ class InstanceManager:
             Result dictionary containing logs
         """
         try:
-            response = requests.get(
+            response = self.http.get(
                 f"{self.base_url}/api/v1/instances/{instance_id}/logs?lines={lines}", timeout=self.timeout
             )
             if response.status_code >= 400:
@@ -165,7 +168,7 @@ class InstanceManager:
             Instance dictionary or None if no available instance
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/instances/available/instance", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/instances/available/instance", timeout=self.timeout)
             response.raise_for_status()
             return response.json()
 
@@ -180,7 +183,7 @@ class InstanceManager:
             Health summary dictionary
         """
         try:
-            response = requests.get(f"{self.base_url}/api/v1/instances/health/summary", timeout=self.timeout)
+            response = self.http.get(f"{self.base_url}/api/v1/instances/health/summary", timeout=self.timeout)
             if response.status_code >= 400:
                 logger.error(f"Failed to get health summary: {response.status_code} {response.text.strip()}")
                 return {"error": f"{response.status_code}: {response.text.strip()}"}

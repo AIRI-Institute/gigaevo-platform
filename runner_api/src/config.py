@@ -27,6 +27,24 @@ class WorkerConfig(BaseModel):
     worker_id: str = Field(default_factory=lambda: f"runner-api-{socket.gethostname()}-{os.getpid()}")
 
 
+class SandboxConfig(BaseModel):
+    """Sandbox backend selection for RUN_AGENT_SKILL tasks (CARE §4.5b)."""
+
+    # ``auto``  → prefer DockerSandboxBackend if the daemon is reachable, fall
+    #             back to LocalSandboxBackend only when ``unsafe_local_allowed``
+    #             is True. Otherwise raise.
+    # ``docker``→ require Docker. Fail closed if the daemon isn't reachable.
+    # ``local`` → always use LocalSandboxBackend. Requires
+    #             ``unsafe_local_allowed`` because Local provides NO isolation.
+    backend: str = "auto"
+    unsafe_local_allowed: bool = False
+    default_cpu_limit: float = 1.0
+    default_memory_limit_mb: int = 512
+    default_pids_limit: int = 256
+    default_timeout_seconds: int = 60
+    image: str = "python:3.12-slim"
+
+
 class GigaEvolveConfig(BaseModel):
     redis_url: str = "redis://redis-gigavolve:6379/0"
     clone_path: str = "/opt/gigaevo-core"
@@ -57,6 +75,9 @@ class Config(BaseSettings):
 
     # GigaEvolve configuration
     gigavolve: GigaEvolveConfig = GigaEvolveConfig()
+
+    # Sandbox configuration (RUN_AGENT_SKILL)
+    sandbox: SandboxConfig = SandboxConfig()
 
     # Extras
     extras: ExtrasConfig = ExtrasConfig()

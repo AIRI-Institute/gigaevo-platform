@@ -22,6 +22,7 @@ docker-compose.runner-pool.*.generated.yml
 .aider*
 .DS_Store
 .ruff_cache
+docs/
 *.ipynb
 *.tsv
 *.cbm

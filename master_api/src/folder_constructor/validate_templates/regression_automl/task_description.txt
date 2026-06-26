@@ -1,0 +1,14 @@
+You are evolving a feature selection program for a tabular regression task.
+Goal: return column indices that maximize downstream R2 of an AutoML regressor (LightAutoML).
+Inputs come via context.py: X_train, y_train, X_test, y_test (numpy arrays).
+The validator trains a LightAutoML TabularAutoML model on the selected features and reports R2 as fitness.
+
+Constraints:
+- No data leakage. Any statistics used must be computed on training data only.
+- Keep runtime modest. Prefer simple, robust heuristics over heavy wrappers.
+- Output must be a 1D int64 array of unique indices within [0..D-1].
+
+Deliverable:
+A complete Python file implementing def entrypoint(context) -> np.ndarray with EVOLVE-BLOCK fences.
+
+

@@ -1,0 +1,7 @@
+Suggested directions:
+- Start simple: keep-all, low-variance filter, univariate mutual information
+- Try train-only stats: variance, ANOVA F-score, chi-square (after scaling/encoding)
+- Avoid leakage: compute thresholds and scores on X_train, y_train only
+- Consider redundancy: drop highly correlated features (corr on X_train)
+- Cap K to avoid overfitting; prefer stable subsets
+- Keep output indices sorted and unique

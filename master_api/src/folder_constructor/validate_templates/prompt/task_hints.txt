@@ -1,0 +1,8 @@
+Provide concise, actionable hints to improve the prompt and guide the model:
+
+- Ensure the question is clear and unambiguous
+- Keep options well-formed and mutually exclusive
+- Ask for the final answer in a strict format
+- Include few-shot examples if available
+
+

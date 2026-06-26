@@ -1,0 +1,7 @@
+Suggested directions:
+- Start simple: keep-all, low-variance filter, PCA pre-check (indices only; do not output transformed features)
+- Use train-only statistics to select features
+- Favor features with higher variance and lower redundancy (corr on X_train)
+- Consider scale: standardize before variance/correlation checks when needed (train-only)
+- Keep K moderate to avoid degenerate clusters
+- Ensure indices are unique, valid, and sorted

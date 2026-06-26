@@ -1,0 +1,34 @@
+services:
+  # Web UI
+  web-ui:
+    build:
+      context: .
+      dockerfile: web_ui/Dockerfile
+    env_file:
+      - .env
+    environment:
+      - MASTER_API_URL=http://master-api:8000
+      - PUBLIC_MASTER_API_URL=http://localhost:${MASTER_API_HOST_PORT:-8000}
+      - S3_API_URL=http://localhost:${MINIO_API_HOST_PORT:-9000}
+      - INTERNAL_S3_API_URL=http://minio:9000
+      - INPUT_DATA_DIR=/tmp/input_data
+    ports:
+      - "${WEB_UI_HOST_PORT:-7860}:7860"
+    depends_on:
+      master-api:
+        condition: service_healthy
+    volumes:
+      - ./llm_models.yml:/llm_models.yml:ro
+    command: ["/app/.venv/bin/python", "app.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - gigaevo-network
+
+networks:
+  gigaevo-network:
+    external: true
+    name: ${GIGAEVO_NETWORK_NAME:-gigaevo-network}

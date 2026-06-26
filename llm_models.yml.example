@@ -1,0 +1,50 @@
+version: 1
+
+# Repo-level registry of supported LLMs.
+# - `id` is the stable identifier sent through APIs and stored in experiment configs.
+# - `label` is what the UI displays.
+# - This file is the single source of truth for LLM configuration across services.
+#
+# SETUP INSTRUCTIONS:
+# 1. Copy this file to llm_models.yml: cp llm_models.yml.example llm_models.yml
+# 2. Edit llm_models.yml and replace all REPLACE_ME values with your actual API keys
+# 3. Do NOT commit llm_models.yml as it contains sensitive secrets
+
+defaults:
+  llm_model: gigachat-max-2
+  prompt_llm_model: gigachat-max-2
+
+models:
+  - id: gigachat-max-2
+    label: GigaChat Max 2
+    ui:
+      description: "Higher quality, remote provider"
+      tags: [recommended]
+    runtime:
+      base_url: "https://inference.airi.net:46783/v1"
+      api_key: "REPLACE_ME"
+      model: "Sber/GigaChat-Max-V2"
+      temperature: 0.7
+      max_tokens: 2048
+      top_p: 1.0
+      request_timeout: 600
+      max_retries: 3
+      timeout: 600
+      ssl_no_verify: false
+
+  - id: deepseek-r1t-chimera
+    label: DeepSeek R1T Chimera
+    ui:
+      description: "Fallback model"
+      tags: [default]
+    runtime:
+      base_url: "https://openrouter.ai/api/v1"
+      api_key: "REPLACE_ME"
+      model: "tngtech/deepseek-r1t-chimera:free"
+      temperature: 0.7
+      max_tokens: 2048
+      top_p: 1.0
+      request_timeout: 600
+      max_retries: 3
+      timeout: 600
+      ssl_no_verify: false

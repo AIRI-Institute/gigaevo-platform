@@ -1,0 +1,377 @@
+# GigaEvo Platform
+
+A machine learning experiment management system with a microservices architecture, featuring Kafka-based messaging and three-tier service separation.
+
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+## 🏗️ Architecture Overview
+
+GigaEvo Platform consists of three main components:
+
+### 🔧 Master API (Port 8000)
+
+- **Role**: Experiment orchestration and coordination
+- **Technology**: FastAPI, Kafka, PostgreSQL, Redis
+- **Features**:
+  - Kafka integration for async messaging
+  - Experiment lifecycle management
+  - Configuration storage and retrieval
+  - uv-based dependency management
+
+### 🏃 Runner API (Port 8001)
+
+- **Role**: Task execution with GigaEvolve integration
+- **Technology**: FastAPI, GigaEvolve tools
+- **Features**:
+  - Experiment code execution
+  - Results visualization
+  - Best program extraction
+  - Background task processing
+
+### 🌐 WebUI (Port 7860)
+
+- **Role**: Gradio-based user interface
+- **Technology**: Gradio, Plotly, Requests
+- **Features**:
+  - Interactive experiment creation
+  - Real-time progress monitoring
+  - Results visualization
+  - System status dashboard
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Docker & Docker Compose
+- Python 3.12+ (for local development)
+- uv (recommended) or pip
+
+### LLM configuration
+
+GigaEvo platform reads all LLM settings from a single repo-level file: `llm_models.yml`. Create `llm_models.yml` from the `llm_models.yml.example` template and fill in your credentials.
+
+### Using the Deployment System
+
+GigaEvo Platform uses the **deploy.sh** script with Docker Compose for service orchestration:
+
+#### 1. Deploy Everything (Recommended)
+
+```bash
+make deploy
+# Or directly:
+./deploy.sh deploy
+```
+
+This will deploy with automated health checks:
+
+- **Infrastructure**: PostgreSQL, Kafka (KRaft), Redis (2 instances), MinIO
+- **Applications**: Master API, Runner API, WebUI
+- **Networking**: Docker network and shared volumes
+- **Health Monitoring**: Automatic service health verification
+
+#### 2. Deploy Development Environment
+
+```bash
+make dev
+```
+
+#### 3. Individual Service Development
+
+```bash
+# Run services locally for development (requires infrastructure running)
+make master-api    # Master API on port 8000
+make runner-api    # Runner API on port 8001
+make web-ui        # WebUI on port 7860
+```
+
+#### 4. Service Management
+
+```bash
+# Check all services status
+make status
+# Or:
+./deploy.sh status
+
+# Stop all services
+make stop
+# Or:
+./deploy.sh stop
+
+# Remove deploy containers and volumes
+./deploy.sh clean
+
+# Full cleanup for both dev and deploy
+make clean
+
+# Restart specific service
+make restart SERVICE=master-api
+make restart SERVICE=runner-api
+make restart SERVICE=web-ui
+make restart SERVICE=kafka
+
+# View service logs
+./deploy.sh logs [service-name]
+```
+
+### Access Points
+
+- **WebUI**: `http://localhost:${WEB_UI_HOST_PORT}` (default `7860`)
+- **Master API**: `http://localhost:${MASTER_API_HOST_PORT}` (default `8000`)
+- **Runner API**: `http://localhost:${RUNNER_API_HOST_PORT}` (default `8001`)
+- **MinIO Console**: `http://localhost:${MINIO_CONSOLE_HOST_PORT}` (default `9001`; credentials come from `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`)
+- **Kafka Broker**: `localhost:${KAFKA_HOST_PORT}` (default `9092`)
+- **Kafka UI**: available in dev mode at `http://localhost:${KAFKA_UI_HOST_PORT}` (default `8080`)
+
+### Runner pool size configuration
+
+By default, the platform starts with a single runner instance. To run multiple experiments in parallel, increase the runner pool size:
+
+```bash
+# In .env file (or export before running `make deploy`)
+RUNNER_POOL_SIZE=3    # Number of runner instances (default: 1)
+```
+
+The system automatically generates a `docker-compose.runner-pool.*.generated.yml` file with N runner services.
+All generated runner services reuse one shared runner image tagged from `COMPOSE_PROJECT_NAME`.
+
+### Environment configuration
+
+The main deployment-related environment variables for this repo are:
+
+- `COMPOSE_PROJECT_NAME` for Compose resource naming and the shared runner image tag
+- `GIGAEVO_NETWORK_NAME` for the shared Docker network used by the deploy stack
+- `GIGAEVO_CORE_REPO_URL` / `GIGAEVO_CORE_REF` for the baked `gigaevo-core` runner image inputs
+- `MEMORY_API_URL` for the external `gigaevo-memory` API endpoint as seen from runner containers
+- `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` for MinIO server and platform storage access
+- `*_HOST_PORT` values for published service ports
+
+`COMPOSE_PROJECT_NAME` is required for supported container flows.
+
+Example:
+
+```bash
+COMPOSE_PROJECT_NAME=gigaevo-platform
+GIGAEVO_NETWORK_NAME=gigaevo-platform-network
+MINIO_ROOT_USER=gigaevoadmin
+MINIO_ROOT_PASSWORD=change-this-minio-password
+POSTGRES_HOST_PORT=5432
+REDIS_HOST_PORT=6379
+REDIS_GIGAVOLVE_HOST_PORT=6380
+KAFKA_HOST_PORT=9092
+KAFKA_DOCKER_HOST_PORT=29092
+MASTER_API_HOST_PORT=8000
+RUNNER_API_HOST_PORT=8001
+WEB_UI_HOST_PORT=7860
+MINIO_API_HOST_PORT=9000
+MINIO_CONSOLE_HOST_PORT=9001
+KAFKA_UI_HOST_PORT=8080
+GIGAEVO_CORE_REPO_URL=https://github.com/FusionBrainLab/gigaevo-core
+GIGAEVO_CORE_REF=main
+MEMORY_API_URL=http://host.docker.internal:8002
+```
+
+`MEMORY_API_URL` must be reachable from runner containers. For local development, `http://host.docker.internal:8002` is the recommended default for an externally started `gigaevo-memory` API.
+
+### Runner pool instance controls (WebUI)
+
+The WebUI “Runner Instances” tab calls the Master API (`/api/v1/instances/*`) to start/stop/restart runners and fetch container logs.
+
+With a **Compose-managed runner pool** (`RUNNER__MANAGE_CONTAINERS=false`, the default in `make dev`/`make deploy`), Master controls the already-created `runner-api-N` containers via Docker.
+
+Requirements:
+
+- `master-api` has Docker CLI access via the host socket: mount `/var/run/docker.sock` (and ensure the container user can read/write it; otherwise run `master-api` as root or align the socket group).
+- Runner containers are started by Docker Compose (Master finds them via `com.docker.compose.service=runner-api-N` labels; keep `COMPOSE_PROJECT_NAME` and `GIGAEVO_NETWORK_NAME` aligned with this deployment).
+
+Security note: mounting the Docker socket grants the `master-api` container root-equivalent control over the host Docker engine.
+
+Quick manual checks (requires the stack running):
+
+```bash
+bash ./smoke_runner_instances.sh status
+bash ./smoke_runner_instances.sh health
+bash ./smoke_runner_instances.sh logs runner-1 100
+```
+
+## 📚 API Endpoints
+
+### Master API (as per docs/api_endpoints.md)
+
+- `POST /api/v1/experiments/` - Initialize experiment
+- `GET /api/v1/experiments/` - Get list of experiments
+- `GET /api/v1/experiments/{experiment_id}/status` - Request status
+- `POST /api/v1/experiments/{experiment_id}/start` - Start experiment
+- `POST /api/v1/experiments/{experiment_id}/stop` - Stop experiment
+- `GET /api/v1/experiments/{experiment_id}/results` - Get results
+
+### Runner API (as per docs/api_endpoints.md)
+
+- `POST /api/v1/experiments/{experiment_id}/upload` - Load experiment code
+- `POST /api/v1/experiments/{experiment_id}/start` - Start experiment
+- `POST /api/v1/experiments/{experiment_id}/stop` - Stop experiment
+- `GET /api/v1/experiments/{experiment_id}/status` - Get execution status
+- `GET /api/v1/experiments/{experiment_id}/visualization` - Get visualization
+- `GET /api/v1/experiments/{experiment_id}/best-program` - Get best program
+- `GET /api/v1/experiments/{experiment_id}/logs` - Get logs (optional)
+
+## 🔄 Kafka Topics
+
+The system uses these Kafka topics for coordination:
+
+- `experiment-config` - Experiment configuration received
+- `experiment-prepared` - Experiment prepared for execution
+- `experiment-started` - Experiment execution started
+- `experiment-stopped` - Experiment execution stopped
+- `runner-status` - Runner status updates
+
+## 🛠️ Development
+
+### Local Development Setup
+
+```bash
+# Verify required local tools (docker, docker compose, python3)
+make check-tools
+
+# Install all dependencies
+make install
+
+# Run services individually (infrastructure must be running first)
+make master-api    # Master API on port 8000
+make runner-api    # Runner API on port 8001
+make web-ui        # WebUI on port 7860
+```
+
+### Container-Based Development
+
+```bash
+# Development with hot reload (foreground)
+make dev
+
+# Stop containers
+make stop
+
+# Stop foreground session
+# Ctrl+C
+
+# Full cleanup (including volumes)
+make clean-dev
+```
+
+### Code Quality
+
+```bash
+make check-runner-compose   # Validate the pool resolves one shared runner image
+make lint     # Run linting with ruff
+make format   # Format code with ruff
+make test     # Run tests (individual components)
+```
+
+### Database Management
+
+```bash
+make db-reset     # Drop and recreate database
+make db-migrate   # Run database migrations
+```
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+1. **Port Conflicts**: Ensure these ports are free:
+
+   - 5432: PostgreSQL
+   - 6379, 6380: Redis (2 instances)
+   - 7860: WebUI
+   - 8000: Master API
+   - 8001: Runner API
+   - 9000, 9001: MinIO
+   - 9092, 29092: Kafka
+
+2. **Deployment Issues**:
+
+   ```bash
+   # Check deployment status
+   ./deploy.sh status
+   # Or:
+   make status
+
+   # View service logs
+   ./deploy.sh logs [service-name]
+   # Or for all services:
+   ./deploy.sh logs
+
+   # Restart specific service
+   make restart SERVICE=master-api
+   make restart SERVICE=runner-api
+   make restart SERVICE=web-ui
+   make restart SERVICE=kafka
+   ```
+
+3. **Service Health Check Failures**:
+
+   ```bash
+   # The deploy script automatically checks service health
+   # If services fail to start, check logs:
+   ./deploy.sh logs postgres
+   ./deploy.sh logs kafka
+   ./deploy.sh logs master-api
+   ```
+
+4. **Database Connection Issues**:
+
+   ```bash
+   # Reset database (use after schema changes)
+   make db-reset
+
+   # Check PostgreSQL logs
+   ./deploy.sh logs postgres
+   ```
+
+### Environment Variables
+
+Key environment variables for Master API:
+
+- `DATABASE__URL` - PostgreSQL connection string
+- `KAFKA__BOOTSTRAP_SERVERS` - Kafka bootstrap servers
+- `REDIS_URL` - Redis connection URL
+- `STORAGE__ENDPOINT_URL` - MinIO endpoint
+- `STORAGE__ACCESS_KEY` - MinIO access key
+- `STORAGE__SECRET_KEY` - MinIO secret key
+
+In the provided Compose setup, `STORAGE__ACCESS_KEY` and `STORAGE__SECRET_KEY` are populated from `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`.
+
+## 📊 Architecture Details
+
+### Current Kafka-Based Architecture
+
+The platform uses a modern microservices architecture with:
+
+1. **Kafka Message Broker** - Asynchronous service communication with topics for experiment coordination
+2. **Separate Docker Compositions** - Modular deployment with infrastructure and application services
+3. **Health Monitoring** - Automated service health checks and recovery
+4. **Resource Isolation** - Dedicated Redis instances and MinIO storage
+5. **uv Dependency Management** - Fast package installation and dependency caching
+
+### Service Orchestration
+
+- **deploy.sh**: Main deployment script with health checks and service management
+- **docker-compose.kafka.yml**: Core infrastructure services
+- **docker-compose.\*.yml**: Individual application service configurations
+- **Makefile**: Development commands and shortcuts
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests and linting: `make test && make lint`
+5. Submit a pull request
+
+## 📎 Additional Docs
+
+- For deployment from a prebuilt image bundle, see [docs/bundle.md](docs/bundle.md).
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details.

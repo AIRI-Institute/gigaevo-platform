@@ -1,0 +1,14 @@
+You are evolving a feature selection program for a tabular clustering task.
+Goal: return column indices that maximize downstream silhouette score of a light clustering model.
+Inputs come via context.py: X_train, X_test (numpy arrays).
+The validator fits KMeans(n_clusters=${n_clusters}) on train-selected features and reports silhouette on X_test.
+
+Constraints:
+- No data leakage. Any statistics used must be computed on training data only.
+- Keep runtime modest. Prefer simple, robust heuristics over heavy wrappers.
+- Output must be a 1D int64 array of unique indices within [0..D-1].
+
+Deliverable:
+A complete Python file implementing def entrypoint(context) -> np.ndarray with EVOLVE-BLOCK fences.
+
+

@@ -1,0 +1,79 @@
+TASK DEFINITION – CARL CHAIN EVOLUTION
+
+Problem Type: Evolutionary CARL Chain Design
+Challenge: Design and optimize a CARL reasoning chain that generates high-quality solutions for the given task.
+
+OBJECTIVE:
+Implement and iteratively improve a JSON configuration of a CARL reasoning chain.
+The chain must read the input data and guide the underlying LLM through a sequence of reasoning steps to compute the correct answer.
+
+- Output of the program: A CARL chain configuration stored in CHAIN_CONFIG_JSON, executed by the helper module.
+- Fitness: ${fitness_description}
+- Goal: ${fitness_goal}
+
+INPUT–OUTPUT CONTEXT:
+- Input: Each data sample has fields from the dataset.
+- Output: The final answer extracted from the CARL chain's output.
+
+CONSTRAINTS:
+- You MUST keep the `entrypoint` function signature and return format unchanged.
+- You MUST define a single variable `CHAIN_CONFIG_JSON: str` inside the evolve block.
+- `CHAIN_CONFIG_JSON` MUST contain valid JSON describing the CARL chain:
+
+${carl_types_documentation}
+  
+  OPTIONAL FIELDS (at chain level):
+  
+  - "search_config" (OPTIONAL, dict): Configuration for context search strategies. Can include:
+    * "strategy" (str): Either "substring" or "vector" - defines how to search for relevant 
+      context from previous steps or external sources.
+    * "substring_config" (dict): Configuration for substring-based search (if strategy="substring").
+    * "vector_config" (dict): Configuration for vector-based semantic search (if strategy="vector").
+    If omitted, no advanced context search is performed.
+
+- The entrypoint function returns only the chain configuration - execution happens in validate.py.
+
+${available_tools_documentation}
+FAILURE MODES:
+- Invalid JSON (not parseable).
+- Missing required fields for CARL steps.
+- Reasoning chain that does not lead to correct answers.
+
+EVALUATION FRAMEWORK:
+- Performance is evaluated by accuracy and auxiliary metrics.
+- ${fitness_evaluation_description}
+- Higher fitness → better chain.
+
+${task_specific_considerations}
+FROZEN STEPS:
+- Steps marked with "frozen": true MUST NOT be modified during evolution.
+- These steps are automatically restored from BASE_CHAIN_CONFIG after evolution.
+- Do NOT change step_type, step_config, dependencies, or any fields of frozen steps.
+- Only evolve steps that do NOT have "frozen": true.
+- CRITICAL: Do NOT renumber frozen steps. Their step number is their identity.
+  If you add new steps, use numbers that do NOT collide with frozen step numbers.
+  Frozen steps will be force-restored to their ORIGINAL number, content, and dependencies.
+
+OUTPUT FORMAT:
+
+The entrypoint function is FIXED and must NOT be changed.
+The entrypoint only returns the chain configuration - execution happens in validate.py.
+
+CRITICAL: PYTHON CODE SYNTAX
+- You are writing Python code, NOT JSON.
+- Use regular double quotes (") in Python code, NOT escaped quotes (\") or JSON-style escaping.
+- Example: base_steps_by_num = {s.get("number"): s for s in base.get("steps", [])}  ✅ CORRECT
+- Example: base_steps_by_num = {s.get(\"number\"): s for s in base.get(\"steps\", [])}  ❌ WRONG (causes SyntaxError)
+- The CHAIN_CONFIG_JSON variable contains a JSON string, but the Python code around it uses normal Python syntax.
+- All Python code (including _apply_frozen_steps function if present) must use normal Python quotes, not JSON escaping.
+
+
+CHAIN_CONFIG_JSON: str = """<your JSON chain config here>""".strip()
+
+
+def entrypoint(context):
+    """
+    Returns the chain configuration JSON.
+    The chain will be executed in validate.py.
+    """
+    return {"chain_config_json": CHAIN_CONFIG_JSON}

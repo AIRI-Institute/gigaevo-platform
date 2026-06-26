@@ -1,0 +1,202 @@
+services:
+  # Development configuration with hot reload and debugging
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: gigaevo_master
+      POSTGRES_USER: gigaevouser
+      POSTGRES_PASSWORD: gigaevopass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gigaevouser -d gigaevo_master"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for task queue
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--databases", "${REDIS_DATABASES:-16}"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for GigaEvolve experiments
+  redis-gigavolve:
+    image: redis:7-alpine
+    command: ["redis-server", "--databases", "${REDIS_DATABASES:-16}"]
+    ports:
+      - "${REDIS_GIGAVOLVE_HOST_PORT:-6380}:6379"
+    volumes:
+      - redis_gigavolve:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka (KRaft mode — no Zookeeper)
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:${KAFKA_HOST_PORT:-9092},PLAINTEXT_HOST://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "${KAFKA_HOST_PORT:-9092}:9092"
+      - "${KAFKA_DOCKER_HOST_PORT:-29092}:29092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI (Kafdrop)
+  kafka-ui:
+    image: obsidiandynamics/kafdrop:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERCONNECT: kafka:29092
+      KAFKA_PROPERTIES: security.protocol=PLAINTEXT
+      SERVER_SERVLET_CONTEXTPATH: /
+    ports:
+      - "${KAFKA_UI_HOST_PORT:-8080}:9000"
+    restart: unless-stopped
+
+  # MinIO S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Master API (Development)
+  master-api:
+    build:
+      context: .
+      dockerfile: master_api/Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - STORAGE__SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA__ENABLED=true
+      - KAFKA__BOOTSTRAP_SERVERS=kafka:29092
+      # Runner pool (always, even size=1)
+      - RUNNER__POOL_SIZE=${RUNNER_POOL_SIZE:-1}
+      - RUNNER__POOL_HOST_PREFIX=runner-api-
+      - RUNNER__MANAGE_CONTAINERS=false
+      - RUNNER__NETWORK_NAME=${GIGAEVO_NETWORK_NAME:-gigaevo-network}
+      - DEBUG=true
+    ports:
+      - "${MASTER_API_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./master_api/src:/app/src
+      - input_data:/app/input_data
+      - ./llm_models.yml:/llm_models.yml:ro
+      - ./common:/app/common:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      [
+        "uv",
+        "run",
+        "uvicorn",
+        "src.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload"
+      ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Web UI (Development)
+  web-ui:
+    build:
+      context: .
+      dockerfile: web_ui/Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      - MASTER_API_URL=http://master-api:8000
+      - PUBLIC_MASTER_API_URL=http://localhost:${MASTER_API_HOST_PORT:-8000}
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
+      - S3_API_URL=http://localhost:${MINIO_API_HOST_PORT:-9000}
+      - INTERNAL_S3_API_URL=http://minio:9000
+    ports:
+      - "${WEB_UI_HOST_PORT:-7860}:7860"
+    depends_on:
+      master-api:
+        condition: service_healthy
+    volumes:
+      - ./web_ui:/app
+      - ./llm_models.yml:/llm_models.yml:ro
+      - ./common:/common:ro
+      # Chain diff + CARL presets (master_api/src, data_examples, carl_examples)
+      - ./master_api:/deps/master_api:ro
+    command: ["uv", "run", "python", "app.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+  redis_gigavolve:
+  minio_data:
+  input_data:

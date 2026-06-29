@@ -1,0 +1,50 @@
+services:
+  # Master API
+  master-api:
+    build:
+      context: .
+      dockerfile: master_api/Dockerfile
+    environment:
+      - DATABASE__URL=postgresql+asyncpg://gigaevouser:gigaevopass@postgres:5432/gigaevo_master
+      - STORAGE__ENDPOINT_URL=http://minio:9000
+      - STORAGE__ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - STORAGE__SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA__ENABLED=true
+      - KAFKA__BOOTSTRAP_SERVERS=kafka:9092
+      # Runner pool (always, even size=1)
+      - RUNNER__POOL_SIZE=${RUNNER_POOL_SIZE:-1}
+      - RUNNER__POOL_HOST_PREFIX=runner-api-
+      # Compose manages runner containers; Master monitors/allocates only
+      - RUNNER__MANAGE_CONTAINERS=false
+      - RUNNER__NETWORK_NAME=${GIGAEVO_NETWORK_NAME:-gigaevo-network}
+    ports:
+      - "${MASTER_API_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-gigavolve:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - input_data:/app/input_data
+      - ./llm_models.yml:/llm_models.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    networks:
+      - gigaevo-network
+
+networks:
+  gigaevo-network:
+    external: true
+    name: ${GIGAEVO_NETWORK_NAME:-gigaevo-network}

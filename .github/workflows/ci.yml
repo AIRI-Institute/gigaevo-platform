@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Allow other workflows (mirror.yml) to run this lint+test suite as a
+  # gating job, so the public mirror only happens when CI is green.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint + tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the pinned floor (.python-version / requires-python). Add
+        # "3.13" here once the heavy runner deps (scipy, langchain, …) are
+        # confirmed green on it.
+        python: ["3.12"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          # No uv.lock is committed, so the default `**/uv.lock` cache key
+          # matches nothing and setup-uv errors. Key the cache on the
+          # pyproject files that drive the dependency set instead.
+          cache-dependency-glob: |
+            pyproject.toml
+            master_api/pyproject.toml
+            runner_api/pyproject.toml
+
+      - name: Create venv and install dependencies
+        # The repo root is a flat layout with several top-level packages
+        # (master_api, runner_api, web_ui, common, docker), so it is NOT
+        # pip-installable as a single project. The tests don't need it
+        # installed — they put master_api/src + runner_api/src on sys.path
+        # themselves — they only need the third-party deps. The authoritative
+        # dependency sets are the per-service test projects
+        # (master_api/pyproject.toml = "master-api-tests",
+        # runner_api/pyproject.toml = "runner-api-tests") plus the root base
+        # deps. Union their `[project].dependencies` so this list never drifts.
+        run: |
+          uv venv --python ${{ matrix.python }}
+          source .venv/bin/activate
+          uv pip install ruff pytest pytest-asyncio
+          python - <<'PY'
+          import subprocess, tomllib
+
+          sources = [
+              "pyproject.toml",            # root base deps (pydantic, pydantic-settings)
+              "master_api/pyproject.toml", # master service test deps
+              "runner_api/pyproject.toml", # runner service test deps
+          ]
+
+          deps, seen = [], set()
+          for path in sources:
+              with open(path, "rb") as fh:
+                  for dep in tomllib.load(fh)["project"].get("dependencies", []):
+                      # Skip any self-referential `gigaevo-platform[...]` entries.
+                      if dep.startswith("gigaevo-platform"):
+                          continue
+                      if dep not in seen:
+                          seen.add(dep)
+                          deps.append(dep)
+
+          subprocess.check_call(["uv", "pip", "install", *deps])
+          PY
+          # Expose the venv to the lint + test steps below.
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run ruff
+        # Advisory for now: the tree still has lint debt (unsorted imports,
+        # trailing whitespace, a couple of F821/F841). Surfaces issues in
+        # the log without blocking PRs. Flip `continue-on-error` to false
+        # once `ruff check .` is clean.
+        continue-on-error: true
+        run: ruff check .
+
+      - name: Run pytest
+        # The top-level `tests/` suite is the offline gate (273 cases): it
+        # stubs/monkeypatches its way around live Postgres/Kafka/Redis. The
+        # per-service suites (master_api/tests, runner_api/tests) need a
+        # running stack and are intentionally out of CI scope.
+        #
+        # asyncio_mode=auto lives in master_api/pyproject.toml, which pytest
+        # doesn't pick up when collecting from the repo root, so set it here.
+        run: python -m pytest tests/ -o asyncio_mode=auto -q

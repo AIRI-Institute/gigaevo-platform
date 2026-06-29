@@ -1,0 +1,74 @@
+PROMPT EVOLUTION
+
+You are evolving a prompt template string that will be used to query an LLM for solving a downstream task defined below. The prompt template uses Python format strings with placeholders syntax which will be filled with dataset sample fields at runtime.
+
+Follow the next guidelines:
+1) Prompt optimization is a high-dimensional, experimental design problem. The final prompt may combine:
+- Reasoning scaffolds: explicit step-by-step thinking, sub-problem decomposition, self-verification, critique loops
+- Instruction precision: task boundaries, structural directives
+- Role & context framing: role definition, domain setup, goal specification, success criteria
+- In-context exemplars: input-output examples, pattern demonstrations
+- Constraints: output schema, formatting rules
+2) Implementation details:
+- Use Python format strings with placeholders syntax
+- Placeholders will be filled from dataset sample fields presented below
+- The cost of an LLM call should not exceed $1.00
+
+TASK DEFINITION – PROMPT EVOLUTION AND OPTIMIZATION
+
+Challenge: Design prompt templates that maximize ${metric} by improving the LLM's ability to perform ${description}.
+
+Problem Type: ${validation_type}
+Evaluation Metric: ${metric} - ${metric_description}
+
+OBJECTIVE
+
+Implement a Python function that defines a prompt template guiding the LLM to perform the target task effectively such that:
+
+1. All required placeholders are explicitly referenced as placeholders within prompt template
+2. The prompt template guides the LLM to perform ${description}
+3. Output format matches the specified extraction pattern
+4. Maximizes the measured ${metric}
+
+Output: ${output_specification} | Goal: maximum possible metric
+
+DATASET FIELDS
+
+Available input fields:
+${input_fields}
+
+CONSTRAINTS
+
+- Must define `PROMPT_TEMPLATE: str`
+- Required input fields (${required_fields_text}) MUST be explicitly referenced as placeholders within the `PROMPT_TEMPLATE` (1 or more times); each will be automatically substituted at runtime
+- Optional input fields (${optional_fields_text}) CAN be optionally referenced as placeholders within the `PROMPT_TEMPLATE`; each will be automatically substituted at runtime if used
+- Output format specification: ${output_specification}
+- Runtime constraint: Maximum cost of 1.0 dollars per LLM call
+
+FAILURE MODES
+
+- Missing required placeholders
+- Incorrect output format (does not match extraction pattern)
+- Exceeding cost budget ($1.00 per LLM call)
+
+OUTPUT FORMAT
+
+The entrypoint function and imports are FIXED and must NOT be changed:
+```python
+from helper import run_agent
+
+# EVOLVE-BLOCK-START
+
+PROMPT_TEMPLATE: str = """Your prompt template here with placeholders."""
+
+# EVOLVE-BLOCK-END
+
+def entrypoint(context):
+    return run_agent(PROMPT_TEMPLATE, context)
+```
+
+**Critical:**
+- Only code inside EVOLVE-BLOCK-START and EVOLVE-BLOCK-END can be modified
+- DO NOT remove the EVOLVE-BLOCK-START fences
+- Must define `PROMPT_TEMPLATE: str` inside the evolve block
+- The `entrypoint` function and imports must remain UNCHANGED

@@ -1,0 +1,18 @@
+[project]
+name = "web-ui-tests"
+version = "0.1.0"
+description = "Web UI component tests for GigaEvo Platform"
+requires-python = ">=3.12"
+dependencies = [
+    # Open package: https://pypi.org/project/mmar-carl/
+    "mmar-carl>=0.1.0",
+    "gradio>=4.0.0",
+    "loguru>=0.7.3",
+    "requests>=2.31.0",
+    "pandas>=2.0.0",
+    "plotly>=5.0.0",
+    "httpx",
+    "pyyaml>=6.0.1",
+    "pytest",
+    "matplotlib>=3.10.7",
+]

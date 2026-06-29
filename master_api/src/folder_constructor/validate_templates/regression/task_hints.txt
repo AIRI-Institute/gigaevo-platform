@@ -1,0 +1,7 @@
+Suggested directions:
+- Start simple: keep-all, low-variance filter, univariate correlation with target
+- Train-only stats: Pearson/Spearman with y_train; beware nonlinearity
+- Reduce multicollinearity: drop one of highly correlated pairs (on X_train)
+- Consider scaling-sensitive heuristics; standardize before correlation checks if needed
+- Keep K bounded; prefer stable subsets over noisy large sets
+- Output indices must be unique, within bounds, and sorted

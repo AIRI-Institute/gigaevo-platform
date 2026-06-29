@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.7
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+ENV PYTHONPATH=/app:/
+# Copy instead of hardlink out of the uv cache mount (different filesystem).
+ENV UV_LINK_MODE=copy
+# Compile .pyc at install time so the first import per container is faster.
+ENV UV_COMPILE_BYTECODE=1
+
+# uv is provided by the base image. apt cache mounts keep .debs across rebuilds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gosu
+
+# Copy dependency manifests only; app code is mounted in development.
+COPY web_ui/pyproject.toml ./pyproject.toml
+COPY web_ui/uv.lock ./uv.lock
+
+# Install dependencies; the uv cache mount reuses wheels across rebuilds.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
+
+# Copy entrypoint script
+COPY web_ui/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Create directories and user (will be adjusted in entrypoint)
+RUN mkdir -p /app && \
+    useradd -m -u 1000 gigaevouser || true
+
+# Don't switch to gigaevouser here - we'll do it in the entrypoint
+# USER gigaevouser
+
+# Expose port
+EXPOSE 7860
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:7860 || exit 1
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Development mode - command specified in docker-compose

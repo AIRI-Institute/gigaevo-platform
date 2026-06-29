@@ -1,0 +1,9 @@
+Improve the current prompt by applying one small change that:
+- increases clarity,
+- reduces ambiguity,
+- improves alignment with the task,
+- or enforces stricter output format.
+
+Return only the updated prompt text.
+
+

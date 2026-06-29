@@ -1,0 +1,52 @@
+name: Release
+
+# Runs only after the CI workflow (lint + tests) finishes successfully on
+# main. If CI was green and `pyproject.toml` names a version that isn't
+# tagged yet, push a `v<version>` tag at the exact commit CI tested. Tests
+# therefore always gate the tag, and the tag only moves when the version
+# actually changes.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    # Skip entirely unless the triggering CI run passed.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # push the v<version> tag
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Tag the exact commit CI tested, not the branch tip.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # Need tag refs to check for an existing tag.
+          fetch-depth: 0
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ -z "$version" ]; then
+            echo "Could not parse version from pyproject.toml" >&2
+            exit 1
+          fi
+          echo "version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the release if the version changed
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "Tag v$version already exists — version unchanged, nothing to do."
+          else
+            git tag "v$version"
+            git push origin "v$version"
+            echo "Pushed tag v$version."
+          fi

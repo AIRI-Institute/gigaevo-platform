@@ -1,0 +1,75 @@
+name: Mirror to public repo
+
+# On every push to `release`, force-push a single squashed snapshot of the
+# working tree to the public mirror AIRI-Institute/gigaevo-platform (its `main`
+# branch).
+#
+# We build an orphan commit (no parents) and force-push it, so the private
+# repo's internal commit history NEVER reaches the public mirror — the public
+# `main` always shows exactly one commit: the current release snapshot.
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+# Only reads from this repo; the push to the mirror is authenticated with the
+# MIRROR_TOKEN secret, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+# Never let two snapshots race onto the public mirror at once.
+concurrency:
+  group: mirror-public
+  cancel-in-progress: false
+
+jobs:
+  # Gate the mirror on the full lint + test suite. This reuses CI's exact
+  # job definition (ci.yml's `workflow_call` trigger), running it against the
+  # release tree. If it fails, the `mirror` job below is skipped and nothing
+  # reaches the public repo.
+  ci:
+    name: Gate on CI (lint + tests)
+    uses: ./.github/workflows/ci.yml
+
+  mirror:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tree
+        uses: actions/checkout@v5
+        with:
+          ref: release
+          # We squash to a single orphan commit, so only the current tree
+          # matters — no need to fetch history.
+          fetch-depth: 1
+          # Don't persist the GITHUB_TOKEN as an http.extraheader in git
+          # config: that header is scoped to github.com and would override
+          # the MIRROR_TOKEN we embed in the push URL, making the push run
+          # as github-actions[bot] (which has no access to the mirror → 403).
+          persist-credentials: false
+
+      - name: Push squashed snapshot to public mirror
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${MIRROR_TOKEN:-}" ]; then
+            echo "::error::MIRROR_TOKEN secret is not set. Create a fine-grained PAT on AIRI-Institute/gigaevo-platform with Contents: read & write AND Workflows: read & write, then add it as the MIRROR_TOKEN repo secret." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Orphan branch = root commit with no parent, holding the full tree.
+          git checkout --orphan public-snapshot
+          git add -A
+          git commit -m "Release snapshot from release @ ${GITHUB_SHA::7}"
+
+          # Force-replace the mirror's main with this single snapshot commit.
+          # `-c http.https://github.com/.extraheader=` clears any persisted
+          # Authorization header so the MIRROR_TOKEN in the URL is honoured.
+          git -c http.https://github.com/.extraheader= push --force \
+            "https://x-access-token:${MIRROR_TOKEN}@github.com/AIRI-Institute/gigaevo-platform.git" \
+            public-snapshot:main
